@@ -232,11 +232,13 @@ impl io::Write for SerialPort {
 		};
 		if res == FALSE {
 			// WriteFile() may fail with ERROR_SEM_TIMEOUT, which is not
-			// io::ErrorKind::TimedOut as of Rust 1.43, so create a custom
+			// io::ErrorKind::TimedOut prior to Rust 1.46, so create a custom
 			// error with kind TimedOut to simplify subsequent error handling.
-			// https://github.com/rust-lang/rust/issues/71646
+			// https://github.com/rust-lang/rust/pull/71756
 			let error = io::Error::last_os_error();
-			if error.raw_os_error().unwrap() as DWORD == ERROR_SEM_TIMEOUT {
+			// TODO: wrap if clause in if_rust_version! { < 1.46 { ... }}
+			if error.raw_os_error().unwrap() as DWORD == ERROR_SEM_TIMEOUT
+			&& error.kind() != io::ErrorKind::TimedOut {
 				return Err(io::Error::new(io::ErrorKind::TimedOut,
 					"WriteFile() timed out (ERROR_SEM_TIMEOUT)"));
 			}
