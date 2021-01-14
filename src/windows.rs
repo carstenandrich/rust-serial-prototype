@@ -56,7 +56,9 @@ impl SerialPort {
 			CreateEventW(ptr::null_mut(), FALSE, FALSE, ptr::null_mut())
 		};
 		if event == NULL {
-			return Err(io::Error::last_os_error());
+			let error = io::Error::last_os_error();
+			debug_assert_ne!(unsafe { CloseHandle(comdev) }, 0);
+			return Err(error);
 		}
 
 		// configure COM port for raw communication
@@ -69,7 +71,10 @@ impl SerialPort {
 		dcb.StopBits = ONESTOPBIT;
 		dcb.Parity = NOPARITY;
 		if unsafe { SetCommState(comdev, &mut dcb) } == 0 {
-			return Err(io::Error::last_os_error());
+			let error = io::Error::last_os_error();
+			debug_assert_ne!(unsafe { CloseHandle(comdev) }, 0);
+			debug_assert_ne!(unsafe { CloseHandle(event) }, 0);
+			return Err(error);
 		}
 
 		// populate COMMTIMEOUTS struct from Option<Duration>
@@ -106,7 +111,10 @@ impl SerialPort {
 
 		// set timouts
 		if unsafe { SetCommTimeouts(comdev, &mut timeouts) } == 0 {
-			return Err(io::Error::last_os_error());
+			let error = io::Error::last_os_error();
+			debug_assert_ne!(unsafe { CloseHandle(comdev) }, 0);
+			debug_assert_ne!(unsafe { CloseHandle(event) }, 0);
+			return Err(error);
 		}
 
 		Ok(Self { comdev, event })
@@ -131,9 +139,12 @@ impl SerialPort {
 				0, FALSE, DUPLICATE_SAME_ACCESS)
 		};
 
-		match res {
-			0 => Err(io::Error::last_os_error()),
-			_ => Ok(Self { comdev, event })
+		if res == 0 {
+			let error = io::Error::last_os_error();
+			debug_assert_ne!(unsafe { CloseHandle(event) }, 0);
+			Err(error)
+		} else {
+			Ok(Self { comdev, event })
 		}
 	}
 
