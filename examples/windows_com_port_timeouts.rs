@@ -87,8 +87,13 @@ impl SerialPort {
 		dcb.ByteSize = 8;
 		dcb.StopBits = ONESTOPBIT;
 		dcb.Parity = NOPARITY;
-		if unsafe { SetCommState(handle, &mut dcb) } == 0 {
-			return Err(io::Error::last_os_error());
+		if unsafe { SetCommState(comdev, &mut dcb) } == 0 {
+			let error = io::Error::last_os_error();
+
+			let _res = unsafe { CloseHandle(handle) };
+			debug_assert_ne!(_res, 0);
+
+			return Err(error);
 		}
 
 		// populate COMMTIMEOUTS struct from Option<Duration>
@@ -129,10 +134,25 @@ impl SerialPort {
 
 		// set timouts
 		if unsafe { SetCommTimeouts(handle, &mut timeouts) } == 0 {
-			return Err(io::Error::last_os_error());
+			let error = io::Error::last_os_error();
+
+			let _res = unsafe { CloseHandle(handle) };
+			debug_assert_ne!(_res, 0);
+
+			return Err(error);
 		}
 
 		Ok(Self { handle })
+	}
+}
+
+impl Drop for SerialPort {
+	fn drop(&mut self) {
+		// https://docs.microsoft.com/de-de/windows/win32/api/handleapi/nf-handleapi-closehandle
+		let _res = unsafe { CloseHandle(comdev) };
+		debug_assert_ne!(_res, 0);
+		let _res = unsafe { CloseHandle(event) };
+		debug_assert_ne!(_res, 0);
 	}
 }
 
