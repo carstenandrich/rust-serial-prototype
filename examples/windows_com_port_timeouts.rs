@@ -95,11 +95,15 @@ impl SerialPort {
 		// https://docs.microsoft.com/en-us/windows/win32/devio/time-outs
 		// https://docs.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-commtimeouts
 		let mut timeouts = if let Some(dur) = timeout {
-			// FIXME: Durations less than 1 ms will configure non-blocking read
-			//        and blocking write without timeout
-			// FIXME: Long Durations will overflow MAXDWORD
 			let dur_ms = dur.as_secs() * 1000
-					   + dur.subsec_millis() as u64;
+			           + dur.subsec_millis() as u64;
+
+			// clip dur_ms to valid range from 1 to MAXDWORD
+			if dur_ms < 1 {
+				dur_ms = 1;
+			} else if dur_ms > MAXDWORD {
+				dur_ms = MAXDWORD;
+			}
 
 			COMMTIMEOUTS {
 				// return immediately if bytes are available (like POSIX would)
