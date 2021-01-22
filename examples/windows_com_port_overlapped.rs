@@ -86,7 +86,10 @@ impl SerialPort {
 		};
 		if event == NULL {
 			let error = io::Error::last_os_error();
-			debug_assert_ne!(unsafe { CloseHandle(comdev) }, 0);
+
+			let _res = unsafe { CloseHandle(comdev) };
+			debug_assert_ne!(_res, 0);
+
 			return Err(error);
 		}
 
@@ -101,8 +104,12 @@ impl SerialPort {
 		dcb.Parity = NOPARITY;
 		if unsafe { SetCommState(comdev, &mut dcb) } == 0 {
 			let error = io::Error::last_os_error();
-			debug_assert_ne!(unsafe { CloseHandle(comdev) }, 0);
-			debug_assert_ne!(unsafe { CloseHandle(event) }, 0);
+
+			let _res = unsafe { CloseHandle(comdev) };
+			debug_assert_ne!(_res, 0);
+			let _res = unsafe { CloseHandle(event) };
+			debug_assert_ne!(_res, 0);
+
 			return Err(error);
 		}
 
@@ -145,8 +152,12 @@ impl SerialPort {
 		// set timouts
 		if unsafe { SetCommTimeouts(comdev, &mut timeouts) } == 0 {
 			let error = io::Error::last_os_error();
-			debug_assert_ne!(unsafe { CloseHandle(comdev) }, 0);
-			debug_assert_ne!(unsafe { CloseHandle(event) }, 0);
+
+			let _res = unsafe { CloseHandle(comdev) };
+			debug_assert_ne!(_res, 0);
+			let _res = unsafe { CloseHandle(event) };
+			debug_assert_ne!(_res, 0);
+
 			return Err(error);
 		}
 
@@ -174,7 +185,10 @@ impl SerialPort {
 
 		if res == 0 {
 			let error = io::Error::last_os_error();
-			debug_assert_ne!(unsafe { CloseHandle(event) }, 0);
+
+			let _res = unsafe { CloseHandle(event) };
+			debug_assert_ne!(_res, 0);
+
 			Err(error)
 		} else {
 			Ok(Self { comdev, event })
@@ -208,8 +222,10 @@ impl SerialPort {
 impl Drop for SerialPort {
 	fn drop(&mut self) {
 		// https://docs.microsoft.com/de-de/windows/win32/api/handleapi/nf-handleapi-closehandle
-		debug_assert_ne!(unsafe { CloseHandle(self.comdev) }, 0);
-		debug_assert_ne!(unsafe { CloseHandle(self.event) }, 0);
+		let _res = unsafe { CloseHandle(comdev) };
+		debug_assert_ne!(_res, 0);
+		let _res = unsafe { CloseHandle(event) };
+		debug_assert_ne!(_res, 0);
 	}
 }
 
