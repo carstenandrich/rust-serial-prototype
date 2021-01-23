@@ -118,13 +118,14 @@ impl SerialPort {
 		// https://docs.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-commtimeouts
 		let mut timeouts = if let Some(dur) = timeout {
 			let mut dur_ms = dur.as_secs() * 1000
-			           + dur.subsec_millis() as u64;
+			               + dur.subsec_millis() as u64;
 
-			// clip dur_ms to valid range from 1 to MAXDWORD
+			// clip dur_ms to valid range from 1 to MAXDWORD - 1
+			// https://docs.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-commtimeouts#remarks
 			if dur_ms < 1 {
 				dur_ms = 1;
-			} else if dur_ms > MAXDWORD as u64 {
-				dur_ms = MAXDWORD as u64;
+			} else if dur_ms >= MAXDWORD as u64 {
+				dur_ms = (MAXDWORD - 1) as u64;
 			}
 
 			COMMTIMEOUTS {
