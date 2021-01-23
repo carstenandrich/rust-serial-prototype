@@ -52,7 +52,7 @@ use winapi::ctypes::c_void;
 use winapi::shared::minwindef::{BOOL, DWORD, TRUE};
 use winapi::um::commapi::{SetCommState, SetCommTimeouts};
 use winapi::um::fileapi::{CreateFileW, OPEN_EXISTING, FlushFileBuffers, ReadFile, WriteFile};
-use winapi::um::handleapi::INVALID_HANDLE_VALUE;
+use winapi::um::handleapi::{CloseHandle, INVALID_HANDLE_VALUE};
 use winapi::um::winbase::{CBR_256000, COMMTIMEOUTS, DCB, NOPARITY, ONESTOPBIT};
 use winapi::um::winnt::{FILE_ATTRIBUTE_NORMAL, GENERIC_READ, GENERIC_WRITE, HANDLE, MAXDWORD};
 
@@ -87,7 +87,7 @@ impl SerialPort {
 		dcb.ByteSize = 8;
 		dcb.StopBits = ONESTOPBIT;
 		dcb.Parity = NOPARITY;
-		if unsafe { SetCommState(comdev, &mut dcb) } == 0 {
+		if unsafe { SetCommState(handle, &mut dcb) } == 0 {
 			let error = io::Error::last_os_error();
 
 			let _res = unsafe { CloseHandle(handle) };
@@ -100,14 +100,14 @@ impl SerialPort {
 		// https://docs.microsoft.com/en-us/windows/win32/devio/time-outs
 		// https://docs.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-commtimeouts
 		let mut timeouts = if let Some(dur) = timeout {
-			let dur_ms = dur.as_secs() * 1000
+			let mut dur_ms = dur.as_secs() * 1000
 			           + dur.subsec_millis() as u64;
 
 			// clip dur_ms to valid range from 1 to MAXDWORD
 			if dur_ms < 1 {
 				dur_ms = 1;
-			} else if dur_ms > MAXDWORD {
-				dur_ms = MAXDWORD;
+			} else if dur_ms > MAXDWORD as u64 {
+				dur_ms = MAXDWORD as u64;
 			}
 
 			COMMTIMEOUTS {
@@ -149,9 +149,7 @@ impl SerialPort {
 impl Drop for SerialPort {
 	fn drop(&mut self) {
 		// https://docs.microsoft.com/de-de/windows/win32/api/handleapi/nf-handleapi-closehandle
-		let _res = unsafe { CloseHandle(comdev) };
-		debug_assert_ne!(_res, 0);
-		let _res = unsafe { CloseHandle(event) };
+		let _res = unsafe { CloseHandle(self.handle) };
 		debug_assert_ne!(_res, 0);
 	}
 }

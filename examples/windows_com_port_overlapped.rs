@@ -117,14 +117,14 @@ impl SerialPort {
 		// https://docs.microsoft.com/en-us/windows/win32/devio/time-outs
 		// https://docs.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-commtimeouts
 		let mut timeouts = if let Some(dur) = timeout {
-			let dur_ms = dur.as_secs() * 1000
+			let mut dur_ms = dur.as_secs() * 1000
 			           + dur.subsec_millis() as u64;
 
 			// clip dur_ms to valid range from 1 to MAXDWORD
 			if dur_ms < 1 {
 				dur_ms = 1;
-			} else if dur_ms > MAXDWORD {
-				dur_ms = MAXDWORD;
+			} else if dur_ms > MAXDWORD as u64 {
+				dur_ms = MAXDWORD as u64;
 			}
 
 			COMMTIMEOUTS {
@@ -140,6 +140,7 @@ impl SerialPort {
 			}
 		} else {
 			// blocking read/write without timeout
+			// FIXME: read() blocks until the read buffer is full
 			COMMTIMEOUTS {
 				ReadIntervalTimeout: 0,
 				ReadTotalTimeoutMultiplier: 0,
@@ -222,9 +223,9 @@ impl SerialPort {
 impl Drop for SerialPort {
 	fn drop(&mut self) {
 		// https://docs.microsoft.com/de-de/windows/win32/api/handleapi/nf-handleapi-closehandle
-		let _res = unsafe { CloseHandle(comdev) };
+		let _res = unsafe { CloseHandle(self.comdev) };
 		debug_assert_ne!(_res, 0);
-		let _res = unsafe { CloseHandle(event) };
+		let _res = unsafe { CloseHandle(self.event) };
 		debug_assert_ne!(_res, 0);
 	}
 }
