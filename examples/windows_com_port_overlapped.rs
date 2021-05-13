@@ -151,7 +151,7 @@ impl SerialPort {
 			}
 		};
 
-		// set timouts
+		// set timeouts
 		if unsafe { SetCommTimeouts(comdev, &mut timeouts) } == 0 {
 			let error = io::Error::last_os_error();
 
@@ -234,23 +234,23 @@ impl Drop for SerialPort {
 impl io::Read for SerialPort {
 	fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
 		// queue async read
-		let mut len: DWORD = 0;
 		let mut overlapped: OVERLAPPED = unsafe { mem::zeroed() };
 		overlapped.hEvent = self.event;
 		let res: BOOL = unsafe {
 			// https://docs.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-readfile
 			ReadFile(self.comdev, buf.as_mut_ptr() as *mut c_void,
-				buf.len() as DWORD, &mut len, &mut overlapped)
+				buf.len() as DWORD, ptr::null_mut(), &mut overlapped)
 		};
 
-		// async read request can (theoretically) succeed immediately, queue successfully, or fail
-		if res == TRUE {
-			return Ok(len as usize);
-		} else if unsafe { GetLastError() } != ERROR_IO_PENDING {
+		// async read request can (theoretically) succeed immediately, queue
+		// successfully, or fail. even if it returns TRUE, the number of bytes
+		// written should be retrieved via GetOverlappedResult().
+		if res == FALSE && unsafe { GetLastError() } != ERROR_IO_PENDING {
 			return Err(io::Error::last_os_error());
 		}
 
 		// wait for completion
+		let mut len: DWORD = 0;
 		let res: BOOL = unsafe {
 			// https://docs.microsoft.com/de-de/windows/win32/api/ioapiset/nf-ioapiset-getoverlappedresult
 			GetOverlappedResult(self.comdev, &mut overlapped, &mut len, TRUE)
@@ -271,23 +271,23 @@ impl io::Read for SerialPort {
 impl io::Write for SerialPort {
 	fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
 		// queue async write
-		let mut len: DWORD = 0;
 		let mut overlapped: OVERLAPPED = unsafe { mem::zeroed() };
 		overlapped.hEvent = self.event;
 		let res: BOOL = unsafe {
 			// https://docs.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-writefile
 			WriteFile(self.comdev, buf.as_ptr() as *const c_void,
-				buf.len() as DWORD, &mut len, &mut overlapped)
+				buf.len() as DWORD, ptr::null_mut(), &mut overlapped)
 		};
 
-		// async write request can (theoretically) succeed immediately, queue successfully, or fail
-		if res == TRUE {
-			return Ok(len as usize);
-		} else if unsafe { GetLastError() } != ERROR_IO_PENDING {
+		// async write request can (theoretically) succeed immediately, queue
+		// successfully, or fail. even if it returns TRUE, the number of bytes
+		// written should be retrieved via GetOverlappedResult().
+		if res == FALSE && unsafe { GetLastError() } != ERROR_IO_PENDING {
 			return Err(io::Error::last_os_error());
 		}
 
 		// wait for completion
+		let mut len: DWORD = 0;
 		let res: BOOL = unsafe {
 			// https://docs.microsoft.com/de-de/windows/win32/api/ioapiset/nf-ioapiset-getoverlappedresult
 			GetOverlappedResult(self.comdev, &mut overlapped, &mut len, TRUE)
@@ -316,6 +316,8 @@ impl io::Write for SerialPort {
 	}
 
 	fn flush(&mut self) -> io::Result<()> {
+		// https://docs.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-flushfilebuffers
+		// https://docs.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-purgecomm#remarks
 		match unsafe { FlushFileBuffers(self.comdev) } {
 			0 => Err(io::Error::last_os_error()),
 			_ => Ok(()),
