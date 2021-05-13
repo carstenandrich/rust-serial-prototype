@@ -57,7 +57,10 @@ impl SerialPort {
 		};
 		if event == NULL {
 			let error = io::Error::last_os_error();
-			debug_assert_ne!(unsafe { CloseHandle(comdev) }, 0);
+
+			let _res = unsafe { CloseHandle(comdev) };
+			debug_assert_ne!(_res, 0);
+
 			return Err(error);
 		}
 
@@ -72,8 +75,12 @@ impl SerialPort {
 		dcb.Parity = NOPARITY;
 		if unsafe { SetCommState(comdev, &mut dcb) } == 0 {
 			let error = io::Error::last_os_error();
-			debug_assert_ne!(unsafe { CloseHandle(comdev) }, 0);
-			debug_assert_ne!(unsafe { CloseHandle(event) }, 0);
+
+			let _res = unsafe { CloseHandle(comdev) };
+			debug_assert_ne!(_res, 0);
+			let _res = unsafe { CloseHandle(event) };
+			debug_assert_ne!(_res, 0);
+
 			return Err(error);
 		}
 
@@ -81,11 +88,16 @@ impl SerialPort {
 		// https://docs.microsoft.com/en-us/windows/win32/devio/time-outs
 		// https://docs.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-commtimeouts
 		let mut timeouts = if let Some(dur) = timeout {
-			// FIXME: Durations less than 1 ms will configure non-blocking read
-			//        and blocking write without timeout
-			// FIXME: Long Durations will overflow MAXDWORD
-			let dur_ms = dur.as_secs() * 1000
-					   + dur.subsec_millis() as u64;
+			let mut dur_ms = dur.as_secs() * 1000
+			               + dur.subsec_millis() as u64;
+
+			// clip dur_ms to valid range from 1 to MAXDWORD - 1
+			// https://docs.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-commtimeouts#remarks
+			if dur_ms < 1 {
+				dur_ms = 1;
+			} else if dur_ms >= MAXDWORD as u64 {
+				dur_ms = (MAXDWORD - 1) as u64;
+			}
 
 			COMMTIMEOUTS {
 				// return immediately if bytes are available (like POSIX would)
@@ -100,6 +112,7 @@ impl SerialPort {
 			}
 		} else {
 			// blocking read/write without timeout
+			// FIXME: read() blocks until the read buffer is full
 			COMMTIMEOUTS {
 				ReadIntervalTimeout: 0,
 				ReadTotalTimeoutMultiplier: 0,
@@ -109,11 +122,15 @@ impl SerialPort {
 			}
 		};
 
-		// set timouts
+		// set timeouts
 		if unsafe { SetCommTimeouts(comdev, &mut timeouts) } == 0 {
 			let error = io::Error::last_os_error();
-			debug_assert_ne!(unsafe { CloseHandle(comdev) }, 0);
-			debug_assert_ne!(unsafe { CloseHandle(event) }, 0);
+
+			let _res = unsafe { CloseHandle(comdev) };
+			debug_assert_ne!(_res, 0);
+			let _res = unsafe { CloseHandle(event) };
+			debug_assert_ne!(_res, 0);
+
 			return Err(error);
 		}
 
@@ -141,7 +158,10 @@ impl SerialPort {
 
 		if res == 0 {
 			let error = io::Error::last_os_error();
-			debug_assert_ne!(unsafe { CloseHandle(event) }, 0);
+
+			let _res = unsafe { CloseHandle(event) };
+			debug_assert_ne!(_res, 0);
+
 			Err(error)
 		} else {
 			Ok(Self { comdev, event })
@@ -175,31 +195,33 @@ impl SerialPort {
 impl Drop for SerialPort {
 	fn drop(&mut self) {
 		// https://docs.microsoft.com/de-de/windows/win32/api/handleapi/nf-handleapi-closehandle
-		debug_assert_ne!(unsafe { CloseHandle(self.comdev) }, 0);
-		debug_assert_ne!(unsafe { CloseHandle(self.event) }, 0);
+		let _res = unsafe { CloseHandle(self.comdev) };
+		debug_assert_ne!(_res, 0);
+		let _res = unsafe { CloseHandle(self.event) };
+		debug_assert_ne!(_res, 0);
 	}
 }
 
 impl io::Read for SerialPort {
 	fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
 		// queue async read
-		let mut len: DWORD = 0;
 		let mut overlapped: OVERLAPPED = unsafe { mem::zeroed() };
 		overlapped.hEvent = self.event;
 		let res: BOOL = unsafe {
 			// https://docs.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-readfile
 			ReadFile(self.comdev, buf.as_mut_ptr() as *mut c_void,
-				buf.len() as DWORD, &mut len, &mut overlapped)
+				buf.len() as DWORD, ptr::null_mut(), &mut overlapped)
 		};
 
-		// async read request can (theoretically) succeed immediately, queue successfully, or fail
-		if res == TRUE {
-			return Ok(len as usize);
-		} else if unsafe { GetLastError() } != ERROR_IO_PENDING {
+		// async read request can (theoretically) succeed immediately, queue
+		// successfully, or fail. even if it returns TRUE, the number of bytes
+		// written should be retrieved via GetOverlappedResult().
+		if res == FALSE && unsafe { GetLastError() } != ERROR_IO_PENDING {
 			return Err(io::Error::last_os_error());
 		}
 
 		// wait for completion
+		let mut len: DWORD = 0;
 		let res: BOOL = unsafe {
 			// https://docs.microsoft.com/de-de/windows/win32/api/ioapiset/nf-ioapiset-getoverlappedresult
 			GetOverlappedResult(self.comdev, &mut overlapped, &mut len, TRUE)
@@ -220,23 +242,23 @@ impl io::Read for SerialPort {
 impl io::Write for SerialPort {
 	fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
 		// queue async write
-		let mut len: DWORD = 0;
 		let mut overlapped: OVERLAPPED = unsafe { mem::zeroed() };
 		overlapped.hEvent = self.event;
 		let res: BOOL = unsafe {
 			// https://docs.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-writefile
 			WriteFile(self.comdev, buf.as_ptr() as *const c_void,
-				buf.len() as DWORD, &mut len, &mut overlapped)
+				buf.len() as DWORD, ptr::null_mut(), &mut overlapped)
 		};
 
-		// async write request can (theoretically) succeed immediately, queue successfully, or fail
-		if res == TRUE {
-			return Ok(len as usize);
-		} else if unsafe { GetLastError() } != ERROR_IO_PENDING {
+		// async write request can (theoretically) succeed immediately, queue
+		// successfully, or fail. even if it returns TRUE, the number of bytes
+		// written should be retrieved via GetOverlappedResult().
+		if res == FALSE && unsafe { GetLastError() } != ERROR_IO_PENDING {
 			return Err(io::Error::last_os_error());
 		}
 
 		// wait for completion
+		let mut len: DWORD = 0;
 		let res: BOOL = unsafe {
 			// https://docs.microsoft.com/de-de/windows/win32/api/ioapiset/nf-ioapiset-getoverlappedresult
 			GetOverlappedResult(self.comdev, &mut overlapped, &mut len, TRUE)
@@ -265,6 +287,8 @@ impl io::Write for SerialPort {
 	}
 
 	fn flush(&mut self) -> io::Result<()> {
+		// https://docs.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-flushfilebuffers
+		// https://docs.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-purgecomm#remarks
 		match unsafe { FlushFileBuffers(self.comdev) } {
 			0 => Err(io::Error::last_os_error()),
 			_ => Ok(()),
