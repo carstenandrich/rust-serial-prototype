@@ -10,14 +10,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::io::FromRawFd;
 use std::time::Duration;
 
-use libc::{O_RDWR, O_NOCTTY, TIOCEXCL};
-
-// Linux-specific imports and definitions required for TIOCGEXCL ioctl, which
-// is not exported by libc crate
-#[cfg(target_os = "linux")]
-use libc::{c_int, c_ulong};
-#[cfg(target_os = "linux")]
-const TIOCGEXCL: c_ulong = 0x80045440;
+use libc::{LOCK_EX, LOCK_NB, O_RDWR, O_NOCTTY, TIOCEXCL};
 
 pub struct SerialPort {
 	fh: File
@@ -32,26 +25,21 @@ impl SerialPort {
 			return Err(io::Error::last_os_error());
 		}
 
-		// requesting exclusive TTY access via TIOCEXCL below is insufficient to
-		// avoid simultaneous access by users with CAP_SYS_ADMIN, which allows
-		// to bypass TIOCEXCL. Linux offers the TIOCGEXCL ioctl to check whether
-		// TIOCEXCL is set for the TTY associated with an fd. therefore, if this
-		// is Linux, use TIOGEXCL to check whether TIOCEXCL is set and return
-		// EBUSY, if so.
-		// https://manpages.debian.org/unstable/manpages-dev/tty_ioctl.4.en.html#Exclusive_mode
-		if cfg!(target_os = "linux") {
-			let mut arg: c_int = 0;
-			if unsafe { libc::ioctl(fd, TIOCGEXCL, &mut arg) } == 0 {
-				if arg > 0 {
-					return Err(io::Error::new(io::ErrorKind::Other,
-						"Device or resource busy"));
-				}
-			}
-		}
-
 		// get exclusive TTY access
 		// http://man7.org/linux/man-pages/man4/tty_ioctl.4.html
-		if unsafe { libc::ioctl(fd, TIOCEXCL) } < 0 {
+		if unsafe { libc::ioctl(fd, TIOCEXCL) } != 0 {
+			return Err(io::Error::last_os_error());
+		}
+
+		// requesting exclusive TTY access via TIOCEXCL above is insufficient to
+		// avoid simultaneous access by users with CAP_SYS_ADMIN, which allows
+		// to bypass TIOCEXCL. therefore, use flock() to place an additional
+		// exclusive advisory lock on the TTY device.
+		// https://stackoverflow.com/questions/49636520/how-do-you-check-if-a-serial-port-is-open-in-linux/49687230#49687230
+		// https://stackoverflow.com/questions/30316722/what-is-the-best-practice-for-locking-serial-ports-and-other-devices-in-linux/34937038#34937038
+		// https://man7.org/linux/man-pages/man2/flock.2.html
+		if unsafe { libc::flock(fd, LOCK_EX | LOCK_NB) } != 0 {
+			// TODO: indicate  that file is locked on EWOULDBLOCK
 			return Err(io::Error::last_os_error());
 		}
 
