@@ -3,31 +3,36 @@ extern crate libc;
 extern crate udev;
 
 use std::ffi::{CString, OsStr, OsString};
-use std::fs::File;
 use std::io;
 use std::mem;
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::io::FromRawFd;
 use std::time::Duration;
 
-use libc::{LOCK_EX, LOCK_NB, O_RDWR, O_NOCTTY, TIOCEXCL};
+use libc::{c_int, c_void, INT_MAX};
 
 pub struct SerialPort {
-	fh: File
+	fd: c_int,
+	timeout_read_ms: c_int,
+	timeout_write_ms: c_int
 }
+
+const TTY_FLAGS: c_int = libc::O_RDWR
+                       | libc::O_CLOEXEC
+                       | libc::O_NOCTTY
+                       | libc::O_NONBLOCK;
 
 impl SerialPort {
 	pub fn open<T>(dev_path: &T, timeout: Option<Duration>) -> io::Result<Self>
 			where T: AsRef<OsStr> + ?Sized {
 		let dev_cstr = CString::new(dev_path.as_ref().as_bytes()).unwrap();
-		let fd = unsafe { libc::open(dev_cstr.as_ptr(), O_RDWR | O_NOCTTY, 0) };
+		let fd = unsafe { libc::open(dev_cstr.as_ptr(), TTY_FLAGS, 0) };
 		if fd < 0 {
 			return Err(io::Error::last_os_error());
 		}
 
 		// get exclusive TTY access
 		// http://man7.org/linux/man-pages/man4/tty_ioctl.4.html
-		if unsafe { libc::ioctl(fd, TIOCEXCL) } != 0 {
+		if unsafe { libc::ioctl(fd, libc::TIOCEXCL) } != 0 {
 			return Err(io::Error::last_os_error());
 		}
 
@@ -38,49 +43,38 @@ impl SerialPort {
 		// https://stackoverflow.com/questions/49636520/how-do-you-check-if-a-serial-port-is-open-in-linux/49687230#49687230
 		// https://stackoverflow.com/questions/30316722/what-is-the-best-practice-for-locking-serial-ports-and-other-devices-in-linux/34937038#34937038
 		// https://man7.org/linux/man-pages/man2/flock.2.html
-		if unsafe { libc::flock(fd, LOCK_EX | LOCK_NB) } != 0 {
-			// TODO: indicate  that file is locked on EWOULDBLOCK
+		if unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+			// TODO: indicate that file is locked on EWOULDBLOCK
 			return Err(io::Error::last_os_error());
 		}
 
-		// compute timeout in tenths of second
-		let timeout_decis: u8 = match timeout {
-			None => 0,
-			Some(dur) if dur < Duration::from_millis(100) => 1,
-			Some(dur) if dur > Duration::from_millis(25500) => 255,
-			Some(dur) => {
-				(dur.as_secs()       *  10) as u8 +
-				(dur.subsec_millis() / 100) as u8
-			}
+		// compute timeout in millisecons for poll()
+		let timeout_ms: c_int = match timeout {
+			None => -1,
+			Some(dur) if dur == Duration::new(0, 0) => 0,
+			Some(dur) if dur <= Duration::from_millis(1) => 1,
+			Some(dur) if dur >= Duration::from_millis(INT_MAX as u64) => INT_MAX,
+			Some(dur) => dur.as_millis() as c_int
 		};
 
-		// set raw mode, speed, and timeout settings, see:
+		// set raw mode, speed, and timeout settings ("polling read"), see:
 		// http://man7.org/linux/man-pages/man3/termios.3.html
-		// FIXME: the highest speed supported by POSIX-compliant termios is
-		//        38400 baud, which may be insufficient for high measurement
-		//        and/or navigation rates in combination with a large set of
-		//        enabled output messages. Linux appears to ignore the baud
-		//        rate setting for CDC devices, but this is not guaranteed for
-		//        other POSIX systems.
-		// TODO: check the linux source, whether the baud rate setting is
-		//       actually being ignored or some other voodoo happens:
-		//       https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/tree/drivers/usb/class/cdc-acm.c?h=linux-5.6.y#n1052
 		let mut termios: libc::termios = unsafe { mem::zeroed() };
 		termios.c_cflag = libc::B38400 | libc::CS8 | libc::CLOCAL | libc::CREAD;
-		// configure "read with timeout" behavior if timeout is given or
-		// "blocking read" if not. we do not want "read with interbyte timeout".
-		termios.c_cc[libc::VMIN] = if timeout_decis == 0 { 1 } else { 0 };
-		termios.c_cc[libc::VTIME] = timeout_decis;
-		if unsafe { libc::tcsetattr(fd, libc::TCSANOW, &termios) } < 0 {
+		if unsafe { libc::tcsetattr(fd, libc::TCSANOW, &termios) } != 0 {
 			return Err(io::Error::last_os_error());
 		}
 
-		Ok(Self { fh: unsafe { File::from_raw_fd(fd) }})
+		Ok(Self {
+			fd,
+			timeout_read_ms: timeout_ms,
+			timeout_write_ms: timeout_ms
+		})
 	}
 
 	#[cfg(not(target_os = "linux"))]
 	pub fn list_devices() -> Vec<OsString> {
-		unimplemented!("Enumerating serial devices is only supported on Linux and Windows");
+		unimplemented!("Enumerating serial devices is only supported on Linux");
 	}
 
 	#[cfg(target_os = "linux")]
@@ -105,22 +99,97 @@ impl SerialPort {
 	}
 
 	pub fn try_clone(&self) -> io::Result<Self> {
-		Ok(Self { fh: self.fh.try_clone()? })
+		// duplicate file descriptor (F_DUPFD_CLOEXEC requires POSIX.1-2008)
+		let fd = unsafe { libc::fcntl(self.fd, libc::F_DUPFD_CLOEXEC, 0) };
+		if fd < 0 {
+			return Err(io::Error::last_os_error());
+		}
+
+		// set TTY flags for duplicate fd. tries to set file creation flags that
+		// are silently ignored.
+		if unsafe { libc::fcntl(fd, libc::F_SETFL, TTY_FLAGS) } != 0 {
+			let error = io::Error::last_os_error();
+
+			let _res = unsafe { libc::close(fd) };
+			debug_assert_ne!(_res, 0);
+
+			return Err(error);
+		}
+
+		Ok(Self {
+			fd,
+			timeout_read_ms: self.timeout_read_ms,
+			timeout_write_ms: self.timeout_write_ms
+		})
+	}
+}
+
+impl Drop for SerialPort {
+	fn drop(&mut self) {
+		let _res = unsafe { libc::close(self.fd) };
+		debug_assert_ne!(_res, 0);
 	}
 }
 
 impl io::Read for SerialPort {
 	fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-		self.fh.read(buf)
+		let mut pollfd = libc::pollfd {
+			fd: self.fd,
+			events: libc::POLLIN,
+			revents: 0
+		};
+		match unsafe { libc::poll(&mut pollfd, 1, self.timeout_read_ms) } {
+			-1 => return Err(io::Error::last_os_error()),
+			0 => return Err(io::Error::new(io::ErrorKind::TimedOut,
+					"poll() timed out")),
+			1 => (),
+			_ => panic!("poll() returned invalid value")
+		}
+
+		// TODO: handle spurious wakeup
+		let len = unsafe {
+			libc::read(self.fd, buf.as_mut_ptr() as *mut c_void, buf.len())
+		};
+		debug_assert!(len < buf.len() as isize);
+		match len {
+			-1 => Err(io::Error::last_os_error()),
+			0 => Err(io::Error::new(io::ErrorKind::UnexpectedEof,
+				"read() returned 0")),
+			_ => Ok(len as usize)
+		}
 	}
 }
 
 impl io::Write for SerialPort {
 	fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-		self.fh.write(buf)
+		let mut pollfd = libc::pollfd {
+			fd: self.fd,
+			events: libc::POLLOUT,
+			revents: 0
+		};
+		match unsafe { libc::poll(&mut pollfd, 1, self.timeout_write_ms) } {
+			-1 => return Err(io::Error::last_os_error()),
+			0 => return Err(io::Error::new(io::ErrorKind::TimedOut,
+					"poll() timed out")),
+			1 => (),
+			_ => panic!("poll() returned invalid value")
+		}
+
+		// TODO: handle spurious wakeup
+		let len = unsafe {
+			libc::write(self.fd, buf.as_ptr() as *mut c_void, buf.len())
+		};
+		match len {
+			-1 => Err(io::Error::last_os_error()),
+			_ => Ok(len as usize)
+		}
 	}
 
 	fn flush(&mut self) -> io::Result<()> {
-		self.fh.flush()
+		match unsafe { libc::fsync(self.fd) } {
+			-1 => Err(io::Error::last_os_error()),
+			0 => Ok(()),
+			_ => panic!("fsync() returned invalid value")
+		}
 	}
 }
