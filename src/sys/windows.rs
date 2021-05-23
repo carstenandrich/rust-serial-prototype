@@ -5,7 +5,7 @@ use std::io;
 use std::mem;
 use std::os::windows::ffi::OsStrExt;
 use std::ptr;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use winapi::ctypes::c_void;
 use winapi::shared::minwindef::{BOOL, DWORD, FALSE, TRUE};
@@ -18,14 +18,15 @@ use winapi::um::handleapi::{CloseHandle, DuplicateHandle, INVALID_HANDLE_VALUE};
 use winapi::um::ioapiset::{CancelIo, GetOverlappedResult};
 use winapi::um::minwinbase::OVERLAPPED;
 use winapi::um::processthreadsapi::GetCurrentProcess;
-use winapi::um::synchapi::{CreateEventW, WaitForSingleObject};
-use winapi::um::winbase::{CBR_256000, COMMTIMEOUTS, DCB, FILE_FLAG_OVERLAPPED, INFINITE, NOPARITY, ONESTOPBIT, WAIT_FAILED, WAIT_OBJECT_0};
+use winapi::um::synchapi::{CreateEventW, CreateMutexW, ReleaseMutex, WaitForSingleObject};
+use winapi::um::winbase::{CBR_256000, COMMTIMEOUTS, DCB, FILE_FLAG_OVERLAPPED, INFINITE, NOPARITY, ONESTOPBIT, WAIT_ABANDONED, WAIT_FAILED, WAIT_OBJECT_0};
 use winapi::um::winnt::{DUPLICATE_SAME_ACCESS, GENERIC_READ, GENERIC_WRITE, HANDLE, MAXDWORD};
 
 pub struct SerialPort {
 	comdev: HANDLE,
 	event_read: HANDLE,
 	event_write: HANDLE,
+	mutex_read: HANDLE,
 	timeout_read_ms: DWORD
 }
 
@@ -157,7 +158,24 @@ impl SerialPort {
 			return Err(error);
 		}
 
-		Ok(Self { comdev, event_read, event_write, timeout_read_ms })
+		let mutex_read = unsafe {
+			// https://docs.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-createmutexw
+			CreateMutexW(ptr::null_mut(), FALSE, ptr::null_mut())
+		};
+		if mutex_read == NULL {
+			let error = io::Error::last_os_error();
+
+			let _res = unsafe { CloseHandle(comdev) };
+			debug_assert_ne!(_res, 0);
+			let _res = unsafe { CloseHandle(event_read) };
+			debug_assert_ne!(_res, 0);
+			let _res = unsafe { CloseHandle(event_write) };
+			debug_assert_ne!(_res, 0);
+
+			return Err(error);
+		}
+
+		Ok(Self { comdev, event_read, event_write, mutex_read, timeout_read_ms })
 	}
 
 	pub fn try_clone(&self) -> io::Result<Self> {
@@ -182,9 +200,26 @@ impl SerialPort {
 			return Err(error);
 		}
 
+		// duplicate mutex handle
+		let mut mutex_read = INVALID_HANDLE_VALUE;
+		let process = unsafe { GetCurrentProcess() };
+		if unsafe {
+			// https://docs.microsoft.com/en-us/windows/win32/api/handleapi/nf-handleapi-duplicatehandle
+			DuplicateHandle(process, self.mutex_read, process, &mut mutex_read,
+				0, FALSE, DUPLICATE_SAME_ACCESS)
+		} == 0 {
+			let error = io::Error::last_os_error();
+
+			let _res = unsafe { CloseHandle(event_read) };
+			debug_assert_ne!(_res, 0);
+			let _res = unsafe { CloseHandle(event_write) };
+			debug_assert_ne!(_res, 0);
+
+			return Err(error)
+		}
+
 		// duplicate communications device handle
 		let mut comdev = INVALID_HANDLE_VALUE;
-		let process = unsafe { GetCurrentProcess() };
 		let res = unsafe {
 			// https://docs.microsoft.com/en-us/windows/win32/api/handleapi/nf-handleapi-duplicatehandle
 			DuplicateHandle(process, self.comdev, process, &mut comdev,
@@ -198,10 +233,18 @@ impl SerialPort {
 			debug_assert_ne!(_res, 0);
 			let _res = unsafe { CloseHandle(event_write) };
 			debug_assert_ne!(_res, 0);
+			let _res = unsafe { CloseHandle(mutex_read) };
+			debug_assert_ne!(_res, 0);
 
 			Err(error)
 		} else {
-			Ok(Self { comdev, event_read, event_write, timeout_read_ms: self.timeout_read_ms })
+			Ok(Self {
+				comdev,
+				event_read,
+				event_write,
+				mutex_read,
+				timeout_read_ms: self.timeout_read_ms
+			})
 		}
 	}
 
@@ -243,8 +286,25 @@ impl Drop for SerialPort {
 
 impl io::Read for SerialPort {
 	fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-		// call WaitCommEvent() to issue overlapped I/O request waiting for
-		// until EV_RXCHAR event occurs
+		// get time before acquiring mutex to update read timeout later
+		let instant_start = Instant::now();
+
+		// acquire read mutex (may block up to self.timeout_read_ms)
+		match unsafe {
+			WaitForSingleObject(self.mutex_read, self.timeout_read_ms)
+		} {
+			WAIT_FAILED => return Err(io::Error::last_os_error()),
+			WAIT_OBJECT_0 => (),
+			WAIT_TIMEOUT => {
+				return Err(io::Error::new(io::ErrorKind::TimedOut,
+					"WaitForSingleObject() timed out"))
+			},
+			WAIT_ABANDONED => unimplemented!("WAIT_ABANDONED occurred"),
+			_ => panic!("invalid WaitForSingleObject() return value")
+		}
+
+		// call WaitCommEvent() to issue overlapped I/O request blocking until
+		// EV_RXCHAR event occurs
 		let mut overlapped: OVERLAPPED = unsafe { mem::zeroed() };
 		overlapped.hEvent = self.event_read;
 		let mut evt_mask: DWORD = 0;
@@ -253,23 +313,42 @@ impl io::Read for SerialPort {
 			WaitCommEvent(self.comdev, &mut evt_mask, &mut overlapped)
 		} {
 			FALSE if unsafe { GetLastError() } != ERROR_IO_PENDING => {
-				return Err(io::Error::last_os_error());
+				let error = io::Error::last_os_error();
+
+				// release mutex
+				let _res = unsafe { ReleaseMutex(self.mutex_read) };
+				debug_assert_ne!(_res, 0);
+
+				return Err(error);
 			},
 			FALSE => (),
-			TRUE => {
-				println!("WaitCommEvent() returned TRUE: {:}", evt_mask);
-			},
+			TRUE => unimplemented!("WaitCommEvent() returned TRUE: {:}", evt_mask),
 			_ => unreachable!()
 		}
 
+		// compute updated read timeout, accounting for time spent waiting for
+		// read mutex, so total timeout does not exceed self.timeout_read_ms
+		let waited_ms = instant_start.elapsed().as_millis();
+		let timeout_read_ms = if waited_ms < self.timeout_read_ms as u128 {
+			self.timeout_read_ms - waited_ms as DWORD
+		} else {
+			0
+		};
+
 		// wait for WaitCommEvent() to complete or timeout to occur
 		// https://docs.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-waitforsingleobject
-		match unsafe { WaitForSingleObject(self.event_read, self.timeout_read_ms) } {
+		match unsafe { WaitForSingleObject(self.event_read, timeout_read_ms) } {
 			WAIT_FAILED => return Err(io::Error::last_os_error()),
 			WAIT_OBJECT_0 => {
 				let mut _undef: DWORD = 0;
 				if unsafe { GetOverlappedResult(self.comdev, &mut overlapped, &mut _undef, FALSE) } == 0 {
-					return Err(io::Error::last_os_error());
+					let error = io::Error::last_os_error();
+
+					// release mutex
+					let _res = unsafe { ReleaseMutex(self.mutex_read) };
+					debug_assert_ne!(_res, 0);
+
+					return Err(error);
 				}
 			},
 			WAIT_TIMEOUT => {
@@ -283,8 +362,19 @@ impl io::Read for SerialPort {
 				// NOTE: CancelIo() only cancels I/O requests issued by the
 				//       calling thread.
 				if unsafe { CancelIo(self.comdev) } == 0 {
-					return Err(io::Error::last_os_error());
+					let error = io::Error::last_os_error();
+
+					// release mutex
+					let _res = unsafe { ReleaseMutex(self.mutex_read) };
+					debug_assert_ne!(_res, 0);
+
+					return Err(error);
 				}
+
+				// release mutex
+				let _res = unsafe { ReleaseMutex(self.mutex_read) };
+				debug_assert_ne!(_res, 0);
+
 				return Err(io::Error::new(io::ErrorKind::TimedOut,
 					"WaitCommEvent() timed out"))
 			},
@@ -305,7 +395,13 @@ impl io::Read for SerialPort {
 		// successfully, or fail. even if it returns TRUE, the number of bytes
 		// written should be retrieved via GetOverlappedResult().
 		if res == FALSE && unsafe { GetLastError() } != ERROR_IO_PENDING {
-			return Err(io::Error::last_os_error());
+			let error = io::Error::last_os_error();
+
+			// release mutex
+			let _res = unsafe { ReleaseMutex(self.mutex_read) };
+			debug_assert_ne!(_res, 0);
+
+			return Err(error);
 		}
 
 		// wait for completion
@@ -315,8 +411,18 @@ impl io::Read for SerialPort {
 			GetOverlappedResult(self.comdev, &mut overlapped, &mut len, TRUE)
 		};
 		if res == FALSE {
-			return Err(io::Error::last_os_error());
+			let error = io::Error::last_os_error();
+
+			// release mutex
+			let _res = unsafe { ReleaseMutex(self.mutex_read) };
+			debug_assert_ne!(_res, 0);
+
+			return Err(error);
 		}
+
+		// release mutex
+		let _res = unsafe { ReleaseMutex(self.mutex_read) };
+		debug_assert_ne!(_res, 0);
 
 		match len {
 			0 if buf.len() == 0 => Ok(0),
