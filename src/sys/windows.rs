@@ -70,53 +70,42 @@ impl SerialPort {
 			return Err(error);
 		}
 
-		// populate COMMTIMEOUTS struct from Option<Duration>
-		// https://docs.microsoft.com/en-us/windows/win32/devio/time-outs
-		// https://docs.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-commtimeouts
-		let mut timeouts = if let Some(dur) = timeout {
-			let mut dur_ms = dur.as_secs() * 1000
-			               + dur.subsec_millis() as u64;
-
-			// clip dur_ms to valid range from 1 to MAXDWORD - 1
-			// https://docs.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-commtimeouts#remarks
-			if dur_ms < 1 {
-				dur_ms = 1;
-			} else if dur_ms >= MAXDWORD as u64 {
-				dur_ms = (MAXDWORD - 1) as u64;
-			}
-
-			COMMTIMEOUTS {
-				// return immediately if bytes are available (like POSIX would)
-				// https://docs.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-commtimeouts#remarks
-				ReadIntervalTimeout: MAXDWORD,
-				ReadTotalTimeoutMultiplier: 0,
-				ReadTotalTimeoutConstant: 0,
-				// MAXDWORD is *not* a reserved WriteTotalTimeoutMultiplier
-				// value, i.e., setting it incurs an very long write timeout
-				WriteTotalTimeoutMultiplier: 0,
-				WriteTotalTimeoutConstant: dur_ms as DWORD,
-			}
-		} else {
-			// blocking read/write without timeout
-			COMMTIMEOUTS {
-				ReadIntervalTimeout: MAXDWORD,
-				ReadTotalTimeoutMultiplier: 0,
-				ReadTotalTimeoutConstant: 0,
-				WriteTotalTimeoutMultiplier: 0,
-				WriteTotalTimeoutConstant: 0,
-			}
+		// compute read timeout in millisecons for WaitForSingleObject()
+		// https://docs.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-waitforsingleobject#parameters
+		let timeout_read_ms: DWORD = match timeout {
+			None => INFINITE,
+			Some(dur) if dur == Duration::new(0, 0) => 0,
+			Some(dur) if dur <= Duration::from_millis(1) => 1,
+			// clip read timeouts at INFINITE - 1 == MAXDWORD - 1
+			Some(dur) if dur >= Duration::from_millis(INFINITE as u64) => INFINITE - 1,
+			Some(dur) => dur.as_millis() as DWORD
 		};
 
-		let timeout_read_ms: DWORD = if let Some(dur) = timeout {
-			let mut dur_ms = dur.as_secs() * 1000
-			               + dur.subsec_millis() as u64;
-			if dur_ms < INFINITE as u64 {
-				dur_ms as DWORD
-			} else {
-				INFINITE - 1
-			}
-		} else {
-			INFINITE
+		// compute write timeout in millisecons for COMMTIMEOUTS
+		// https://docs.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-commtimeouts#members
+		let timeout_write_ms: DWORD = match timeout {
+			// zero is no (i.e., infinite) timeout
+			None => 0,
+			// COMMTIMEOUTS does not support non-blocking write, so set
+			// smallest possible timeout (1 ms) instead for all Durations
+			// up to 1 ms, including zero Duration
+			Some(dur) if dur <= Duration::from_millis(1) => 1,
+			Some(dur) if dur >= Duration::from_millis(MAXDWORD as u64) => MAXDWORD,
+			Some(dur) => dur.as_millis() as DWORD
+		};
+
+		// populate COMMTIMEOUTS struct
+		// https://docs.microsoft.com/en-us/windows/win32/devio/time-outs
+		// https://docs.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-commtimeouts
+		let mut timeouts = COMMTIMEOUTS {
+			// read timeouts are handled via WaitForSingleObject(), so
+			// configure non-blocking read regardless of timeout_read_ms value
+			ReadIntervalTimeout: MAXDWORD,
+			ReadTotalTimeoutMultiplier: 0,
+			ReadTotalTimeoutConstant: 0,
+			// set write timeout computed above
+			WriteTotalTimeoutMultiplier: 0,
+			WriteTotalTimeoutConstant: timeout_write_ms as DWORD,
 		};
 
 		// set timeouts
