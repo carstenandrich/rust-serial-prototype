@@ -6,14 +6,14 @@ use std::ffi::{CString, OsStr, OsString};
 use std::io;
 use std::mem;
 use std::os::unix::ffi::OsStrExt;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use libc::{c_int, c_void, INT_MAX};
 
 pub struct SerialPort {
 	fd: c_int,
-	timeout_read_ms: c_int,
-	timeout_write_ms: c_int
+	timeout_read: Option<Duration>,
+	timeout_write: Option<Duration>
 }
 
 const TTY_FLAGS: c_int = libc::O_RDWR
@@ -48,15 +48,6 @@ impl SerialPort {
 			return Err(io::Error::last_os_error());
 		}
 
-		// compute timeout in millisecons for poll()
-		let timeout_ms: c_int = match timeout {
-			None => -1,
-			Some(dur) if dur == Duration::new(0, 0) => 0,
-			Some(dur) if dur <= Duration::from_millis(1) => 1,
-			Some(dur) if dur >= Duration::from_millis(INT_MAX as u64) => INT_MAX,
-			Some(dur) => dur.as_millis() as c_int
-		};
-
 		// set raw mode, speed, and timeout settings ("polling read"), see:
 		// http://man7.org/linux/man-pages/man3/termios.3.html
 		let mut termios: libc::termios = unsafe { mem::zeroed() };
@@ -67,8 +58,8 @@ impl SerialPort {
 
 		Ok(Self {
 			fd,
-			timeout_read_ms: timeout_ms,
-			timeout_write_ms: timeout_ms
+			timeout_read: timeout,
+			timeout_write: timeout
 		})
 	}
 
@@ -118,8 +109,8 @@ impl SerialPort {
 
 		Ok(Self {
 			fd,
-			timeout_read_ms: self.timeout_read_ms,
-			timeout_write_ms: self.timeout_write_ms
+			timeout_read: self.timeout_read,
+			timeout_write: self.timeout_write
 		})
 	}
 }
@@ -127,7 +118,7 @@ impl SerialPort {
 impl Drop for SerialPort {
 	fn drop(&mut self) {
 		let _res = unsafe { libc::close(self.fd) };
-		debug_assert_ne!(_res, 0);
+		debug_assert_eq!(_res, 0);
 	}
 }
 
@@ -138,24 +129,57 @@ impl io::Read for SerialPort {
 			events: libc::POLLIN,
 			revents: 0
 		};
-		match unsafe { libc::poll(&mut pollfd, 1, self.timeout_read_ms) } {
-			-1 => return Err(io::Error::last_os_error()),
-			0 => return Err(io::Error::new(io::ErrorKind::TimedOut,
-					"poll() timed out")),
-			1 => (),
-			_ => panic!("poll() returned invalid value")
-		}
 
-		// TODO: handle spurious wakeup
-		let len = unsafe {
-			libc::read(self.fd, buf.as_mut_ptr() as *mut c_void, buf.len())
-		};
-		debug_assert!(len < buf.len() as isize);
-		match len {
-			-1 => Err(io::Error::last_os_error()),
-			0 => Err(io::Error::new(io::ErrorKind::UnexpectedEof,
-				"read() returned 0")),
-			_ => Ok(len as usize)
+		let entry = Instant::now();
+		loop {
+			// compute read timeout in ms, accounting for time already elapsed
+			let elapsed = entry.elapsed();
+			let timeout_ms: c_int = match self.timeout_read {
+				None => -1,
+				Some(timeout) if elapsed > timeout => {
+					return Err(io::Error::new(io::ErrorKind::TimedOut,
+						"reading from TTY timed out"));
+				},
+				Some(timeout) if timeout - elapsed <= Duration::from_millis(1) => 1,
+				Some(timeout) if timeout - elapsed >= Duration::from_millis(INT_MAX as u64) => INT_MAX,
+				Some(timeout) => (timeout - elapsed).as_millis() as c_int
+			};
+
+			// block until data is available or timeout occurs
+			match unsafe { libc::poll(&mut pollfd, 1, timeout_ms) } {
+				-1 => return Err(io::Error::last_os_error()),
+				0 => return Err(io::Error::new(io::ErrorKind::TimedOut,
+						"reading from TTY timed out")),
+				_ => ()
+			}
+
+			// on Linux poll() sets POLLERR and POLLHUP if tty disappears
+			if pollfd.revents & (libc::POLLERR | libc::POLLHUP) != 0 {
+				return Err(io::Error::new(io::ErrorKind::UnexpectedEof,
+					"TTY was closed or disconnected"));
+			}
+
+			// try to read() from tty. if multiple threads poll() in parallel,
+			// they are released simultaneously and race for the read(), which
+			// will likely succeed only on one thread.
+			let len = unsafe {
+				libc::read(self.fd, buf.as_mut_ptr() as *mut c_void, buf.len())
+			};
+			debug_assert!(len <= buf.len() as isize);
+			match len {
+				// POSIX allows read() to return either 0 or -1 with EAGAIN if
+				// no data is available, so handle both options as such, see:
+				// https://man7.org/linux/man-pages/man3/termios.3.html
+				-1 => {
+					let error = io::Error::last_os_error();
+					if error.kind() != io::ErrorKind::WouldBlock {
+						return Err(error);
+					}
+				},
+				0 if buf.len() == 0 => return Ok(0),
+				0 => (),
+				_ => return Ok(len as usize)
+			}
 		}
 	}
 }
@@ -167,21 +191,56 @@ impl io::Write for SerialPort {
 			events: libc::POLLOUT,
 			revents: 0
 		};
-		match unsafe { libc::poll(&mut pollfd, 1, self.timeout_write_ms) } {
-			-1 => return Err(io::Error::last_os_error()),
-			0 => return Err(io::Error::new(io::ErrorKind::TimedOut,
-					"poll() timed out")),
-			1 => (),
-			_ => panic!("poll() returned invalid value")
-		}
 
-		// TODO: handle spurious wakeup
-		let len = unsafe {
-			libc::write(self.fd, buf.as_ptr() as *mut c_void, buf.len())
-		};
-		match len {
-			-1 => Err(io::Error::last_os_error()),
-			_ => Ok(len as usize)
+		let entry = Instant::now();
+		loop {
+			// compute write timeout in ms, accounting for time already elapsed
+			let elapsed = entry.elapsed();
+			let timeout_ms: c_int = match self.timeout_write {
+				None => -1,
+				Some(timeout) if elapsed > timeout => {
+					return Err(io::Error::new(io::ErrorKind::TimedOut,
+						"writing to TTY timed out"));
+				},
+				Some(timeout) if timeout - elapsed <= Duration::from_millis(1) => 1,
+				Some(timeout) if timeout - elapsed >= Duration::from_millis(INT_MAX as u64) => INT_MAX,
+				Some(timeout) => (timeout - elapsed).as_millis() as c_int
+			};
+
+			// block until data is available or timeout occurs
+			match unsafe { libc::poll(&mut pollfd, 1, timeout_ms) } {
+				-1 => return Err(io::Error::last_os_error()),
+				0 => return Err(io::Error::new(io::ErrorKind::TimedOut,
+						"writing to TTY timed out")),
+				_ => ()
+			}
+
+			// on Linux poll() sets POLLERR and POLLHUP if tty disappears
+			if pollfd.revents & (libc::POLLERR | libc::POLLHUP) != 0 {
+				return Err(io::Error::new(io::ErrorKind::UnexpectedEof,
+					"TTY was closed or disconnected"));
+			}
+
+			// try to write() to tty. if multiple threads poll() in parallel,
+			// they are released simultaneously and race for the write(), which
+			// may not succeed on all threads if the TTY's output buffer is
+			// full.
+			let len = unsafe {
+				libc::write(self.fd, buf.as_ptr() as *const c_void, buf.len())
+			};
+			debug_assert!(len <= buf.len() as isize);
+			match len {
+				-1 => {
+					let error = io::Error::last_os_error();
+					if error.kind() != io::ErrorKind::WouldBlock {
+						return Err(error);
+					}
+				},
+				0 if buf.len() == 0 => return Ok(0),
+				// FIXME: does len == 0 indicate timeout just like for read()?
+				0 => (),
+				_ => return Ok(len as usize)
+			}
 		}
 	}
 
@@ -189,7 +248,8 @@ impl io::Write for SerialPort {
 		match unsafe { libc::fsync(self.fd) } {
 			-1 => Err(io::Error::last_os_error()),
 			0 => Ok(()),
-			_ => panic!("fsync() returned invalid value")
+			_ if cfg!(debug_assertions) => panic!("fsync() returned invalid value"),
+			_ => unreachable!()
 		}
 	}
 }
