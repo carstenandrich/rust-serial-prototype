@@ -8,7 +8,7 @@ use std::ptr;
 use std::time::{Duration, Instant};
 
 use winapi::ctypes::c_void;
-use winapi::shared::minwindef::{BOOL, DWORD, FALSE, TRUE};
+use winapi::shared::minwindef::{DWORD, FALSE, TRUE};
 use winapi::shared::ntdef::NULL;
 use winapi::shared::winerror::{ERROR_IO_PENDING, ERROR_SEM_TIMEOUT, WAIT_TIMEOUT};
 use winapi::um::commapi::{SetCommMask, SetCommState, SetCommTimeouts, WaitCommEvent};
@@ -21,6 +21,11 @@ use winapi::um::processthreadsapi::GetCurrentProcess;
 use winapi::um::synchapi::{CreateEventW, CreateMutexW, ReleaseMutex, WaitForSingleObject};
 use winapi::um::winbase::{CBR_256000, COMMTIMEOUTS, DCB, FILE_FLAG_OVERLAPPED, INFINITE, NOPARITY, ONESTOPBIT, WAIT_ABANDONED, WAIT_FAILED, WAIT_OBJECT_0};
 use winapi::um::winnt::{DUPLICATE_SAME_ACCESS, GENERIC_READ, GENERIC_WRITE, HANDLE, MAXDWORD};
+
+// character received event mask for WaitCommEvent(), which is missing from
+// winapi 0.3.9
+// https://docs.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-waitcommevent#parameters
+const EV_RXCHAR: DWORD = 0x0001;
 
 pub struct SerialPort {
 	comdev: HANDLE,
@@ -45,6 +50,7 @@ impl SerialPort {
 		name.push(0);
 
 		// open COM port as raw HANDLE
+		// https://docs.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilew
 		let comdev = unsafe {
 			CreateFileW(name.as_ptr(), GENERIC_READ | GENERIC_WRITE, 0,
 				ptr::null_mut(), OPEN_EXISTING, FILE_FLAG_OVERLAPPED, 0 as HANDLE)
@@ -63,11 +69,10 @@ impl SerialPort {
 		dcb.StopBits = ONESTOPBIT;
 		dcb.Parity = NOPARITY;
 		if unsafe { SetCommState(comdev, &mut dcb) } == 0 {
+			// close open handles and return original error on failure
 			let error = io::Error::last_os_error();
-
 			let _res = unsafe { CloseHandle(comdev) };
 			debug_assert_ne!(_res, 0);
-
 			return Err(error);
 		}
 
@@ -111,67 +116,63 @@ impl SerialPort {
 
 		// set timeouts
 		if unsafe { SetCommTimeouts(comdev, &mut timeouts) } == 0 {
+			// close open handles and return original error on failure
 			let error = io::Error::last_os_error();
-
 			let _res = unsafe { CloseHandle(comdev) };
 			debug_assert_ne!(_res, 0);
-
 			return Err(error);
 		}
 
 		// set event mask to EV_RXCHAR, so WaitCommEvent() can be used to wait
 		// until input is available
-		if unsafe { SetCommMask(comdev, 0x0001 as DWORD) } == 0 {
+		if unsafe { SetCommMask(comdev, EV_RXCHAR) } == 0 {
+			// close open handles and return original error on failure
 			let error = io::Error::last_os_error();
-
 			let _res = unsafe { CloseHandle(comdev) };
 			debug_assert_ne!(_res, 0);
-
 			return Err(error);
 		}
 
 		// create unnamed event objects for asynchronous I/O
 		let event_read = unsafe {
-			// https://docs.microsoft.com/de-de/windows/win32/api/synchapi/nf-synchapi-createeventa
+			// https://docs.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-createeventw
 			CreateEventW(ptr::null_mut(), TRUE, FALSE, ptr::null_mut())
 		};
 		if event_read == NULL {
+			// close open handles and return original error on failure
 			let error = io::Error::last_os_error();
-
 			let _res = unsafe { CloseHandle(comdev) };
 			debug_assert_ne!(_res, 0);
-
 			return Err(error);
 		}
 		let event_write = unsafe {
-			// https://docs.microsoft.com/de-de/windows/win32/api/synchapi/nf-synchapi-createeventa
+			// https://docs.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-createeventw
 			CreateEventW(ptr::null_mut(), TRUE, FALSE, ptr::null_mut())
 		};
 		if event_write == NULL {
+			// close open handles and return original error on failure
 			let error = io::Error::last_os_error();
-
 			let _res = unsafe { CloseHandle(comdev) };
 			debug_assert_ne!(_res, 0);
 			let _res = unsafe { CloseHandle(event_read) };
 			debug_assert_ne!(_res, 0);
-
 			return Err(error);
 		}
 
+		// create unnamed mutex object for reading from COM port
 		let mutex_read = unsafe {
 			// https://docs.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-createmutexw
 			CreateMutexW(ptr::null_mut(), FALSE, ptr::null_mut())
 		};
 		if mutex_read == NULL {
+			// close open handles and return original error on failure
 			let error = io::Error::last_os_error();
-
 			let _res = unsafe { CloseHandle(comdev) };
 			debug_assert_ne!(_res, 0);
 			let _res = unsafe { CloseHandle(event_read) };
 			debug_assert_ne!(_res, 0);
 			let _res = unsafe { CloseHandle(event_write) };
 			debug_assert_ne!(_res, 0);
-
 			return Err(error);
 		}
 
@@ -181,63 +182,69 @@ impl SerialPort {
 	pub fn try_clone(&self) -> io::Result<Self> {
 		// create new unnamed event objects for asynchronous I/O
 		let event_read = unsafe {
-			// https://docs.microsoft.com/de-de/windows/win32/api/synchapi/nf-synchapi-createeventa
+			// https://docs.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-createeventw
 			CreateEventW(ptr::null_mut(), TRUE, FALSE, ptr::null_mut())
 		};
 		if event_read == NULL {
 			return Err(io::Error::last_os_error());
 		}
 		let event_write = unsafe {
-			// https://docs.microsoft.com/de-de/windows/win32/api/synchapi/nf-synchapi-createeventa
+			// https://docs.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-createeventw
 			CreateEventW(ptr::null_mut(), TRUE, FALSE, ptr::null_mut())
 		};
 		if event_write == NULL {
+			// close open handles and return original error on failure
 			let error = io::Error::last_os_error();
-
 			let _res = unsafe { CloseHandle(event_read) };
 			debug_assert_ne!(_res, 0);
-
 			return Err(error);
 		}
 
-		// duplicate mutex handle
+		// duplicate mutex object
+		// https://docs.microsoft.com/en-us/windows/win32/api/handleapi/nf-handleapi-duplicatehandle
 		let mut mutex_read = INVALID_HANDLE_VALUE;
 		let process = unsafe { GetCurrentProcess() };
-		if unsafe {
-			// https://docs.microsoft.com/en-us/windows/win32/api/handleapi/nf-handleapi-duplicatehandle
-			DuplicateHandle(process, self.mutex_read, process, &mut mutex_read,
-				0, FALSE, DUPLICATE_SAME_ACCESS)
-		} == 0 {
+		if unsafe { DuplicateHandle(
+			process,
+			self.mutex_read,
+			process,
+			&mut mutex_read,
+			0,
+			FALSE,
+			DUPLICATE_SAME_ACCESS
+		)} == 0 {
+			// close open handles and return original error on failure
 			let error = io::Error::last_os_error();
-
 			let _res = unsafe { CloseHandle(event_read) };
 			debug_assert_ne!(_res, 0);
 			let _res = unsafe { CloseHandle(event_write) };
 			debug_assert_ne!(_res, 0);
-
 			return Err(error)
 		}
 
 		// duplicate communications device handle
+		// https://docs.microsoft.com/en-us/windows/win32/api/handleapi/nf-handleapi-duplicatehandle
 		let mut comdev = INVALID_HANDLE_VALUE;
-		let res = unsafe {
-			// https://docs.microsoft.com/en-us/windows/win32/api/handleapi/nf-handleapi-duplicatehandle
-			DuplicateHandle(process, self.comdev, process, &mut comdev,
-				0, FALSE, DUPLICATE_SAME_ACCESS)
-		};
-
-		if res == 0 {
+		if unsafe { DuplicateHandle(
+			process,
+			self.comdev,
+			process,
+			&mut comdev,
+			0,
+			FALSE,
+			DUPLICATE_SAME_ACCESS
+		)} == 0 {
+			// close open handles and return original error on failure
 			let error = io::Error::last_os_error();
-
 			let _res = unsafe { CloseHandle(event_read) };
 			debug_assert_ne!(_res, 0);
 			let _res = unsafe { CloseHandle(event_write) };
 			debug_assert_ne!(_res, 0);
 			let _res = unsafe { CloseHandle(mutex_read) };
 			debug_assert_ne!(_res, 0);
-
 			Err(error)
 		} else {
+			// return cloned self on success
 			Ok(Self {
 				comdev,
 				event_read,
@@ -261,9 +268,11 @@ impl SerialPort {
 			name_wide.push(0);
 
 			// QueryDosDeviceW() returns 0 if the COM port does not exist
-			let len = unsafe { QueryDosDeviceW(name_wide.as_ptr(),
-				path_wide.as_mut_ptr(),	path_wide.len() as DWORD) } as usize;
-			if len > 0 {
+			if unsafe { QueryDosDeviceW(
+				name_wide.as_ptr(),
+				path_wide.as_mut_ptr(),
+				path_wide.len() as DWORD
+			) as usize } > 0 {
 				devices.push(name);
 			}
 		}
@@ -286,7 +295,8 @@ impl SerialPort {
 					"WaitForSingleObject() timed out"))
 			},
 			WAIT_ABANDONED => unimplemented!("WAIT_ABANDONED occurred"),
-			_ => panic!("invalid WaitForSingleObject() return value")
+			_ if cfg!(debug_assertions) => panic!("illegal WaitForSingleObject() return value"),
+			_ => unreachable!()
 		}
 
 		// call WaitCommEvent() to issue overlapped I/O request blocking until
@@ -299,15 +309,15 @@ impl SerialPort {
 			WaitCommEvent(self.comdev, &mut evt_mask, &mut overlapped)
 		} {
 			FALSE if unsafe { GetLastError() } != ERROR_IO_PENDING => {
+				// release mutex and return original error on failure
 				let error = io::Error::last_os_error();
-
-				// release mutex
 				let _res = unsafe { ReleaseMutex(self.mutex_read) };
 				debug_assert_ne!(_res, 0);
-
 				return Err(error);
 			},
 			FALSE => (),
+			// FIXME: if WaitCommEvent() returns TRUE, the subsequent
+			//        WaitForSingleObject() may be superfluous
 			TRUE => unimplemented!("WaitCommEvent() returned TRUE: {:}", evt_mask),
 			_ => unreachable!()
 		}
@@ -324,16 +334,25 @@ impl SerialPort {
 		// wait for WaitCommEvent() to complete or timeout to occur
 		// https://docs.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-waitforsingleobject
 		match unsafe { WaitForSingleObject(self.event_read, timeout_read_ms) } {
-			WAIT_FAILED => return Err(io::Error::last_os_error()),
+			WAIT_FAILED => {
+				// release mutex and return original error on failure
+				let error = io::Error::last_os_error();
+				let _res = unsafe { ReleaseMutex(self.mutex_read) };
+				debug_assert_ne!(_res, 0);
+				return Err(error);
+			},
 			WAIT_OBJECT_0 => {
 				let mut _undef: DWORD = 0;
-				if unsafe { GetOverlappedResult(self.comdev, &mut overlapped, &mut _undef, FALSE) } == 0 {
+				if unsafe { GetOverlappedResult(
+					self.comdev,
+					&mut overlapped,
+					&mut _undef,
+					FALSE
+				)} == 0 {
+					// release mutex and return original error on failure
 					let error = io::Error::last_os_error();
-
-					// release mutex
 					let _res = unsafe { ReleaseMutex(self.mutex_read) };
 					debug_assert_ne!(_res, 0);
-
 					return Err(error);
 				}
 			},
@@ -347,15 +366,18 @@ impl SerialPort {
 				// OVERLAPPED struct at the same address is used).
 				// NOTE: CancelIo() only cancels I/O requests issued by the
 				//       calling thread.
+				// https://docs.microsoft.com/en-us/windows/win32/api/ioapiset/nf-ioapiset-cancelio
 				if unsafe { CancelIo(self.comdev) } == 0 {
+					// release mutex and return original error on failure
 					let error = io::Error::last_os_error();
-
-					// release mutex
 					let _res = unsafe { ReleaseMutex(self.mutex_read) };
 					debug_assert_ne!(_res, 0);
-
 					return Err(error);
 				}
+				// TODO: Check if I/O operation was actually cancelled or
+				//       if it raced to completion before cancellation
+				//       occurred.
+				// https://docs.microsoft.com/en-us/windows/win32/api/ioapiset/nf-ioapiset-cancelio#remarks
 
 				// release mutex
 				let _res = unsafe { ReleaseMutex(self.mutex_read) };
@@ -365,44 +387,43 @@ impl SerialPort {
 					"WaitCommEvent() timed out"))
 			},
 			// WAIT_ABANDONED must not occur, because self.comdev isn't a mutex
-			_ => panic!("invalid WaitForSingleObject() return value")
+			_ if cfg!(debug_assertions) => panic!("illegal WaitForSingleObject() return value"),
+			_ => unreachable!()
 		}
 
 		// queue async read
 		let mut overlapped: OVERLAPPED = unsafe { mem::zeroed() };
 		overlapped.hEvent = self.event_read;
-		let res: BOOL = unsafe {
-			// https://docs.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-readfile
-			ReadFile(self.comdev, buf.as_mut_ptr() as *mut c_void,
-				buf.len() as DWORD, ptr::null_mut(), &mut overlapped)
-		};
-
 		// async read request can (theoretically) succeed immediately, queue
 		// successfully, or fail. even if it returns TRUE, the number of bytes
 		// written should be retrieved via GetOverlappedResult().
-		if res == FALSE && unsafe { GetLastError() } != ERROR_IO_PENDING {
-			let error = io::Error::last_os_error();
-
-			// release mutex
-			let _res = unsafe { ReleaseMutex(self.mutex_read) };
-			debug_assert_ne!(_res, 0);
-
-			return Err(error);
+		// https://docs.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-readfile
+		if unsafe { ReadFile(
+			self.comdev,
+			buf.as_mut_ptr() as *mut c_void,
+			buf.len() as DWORD,
+			ptr::null_mut(),
+			&mut overlapped
+		)} == FALSE {
+			let errcode = unsafe { GetLastError() };
+			if errcode != ERROR_IO_PENDING {
+				// release mutex and return original error on failure
+				let _res = unsafe { ReleaseMutex(self.mutex_read) };
+				debug_assert_ne!(_res, 0);
+				return Err(io::Error::from_raw_os_error(errcode as i32));
+			}
 		}
 
 		// wait for completion
 		let mut len: DWORD = 0;
-		let res: BOOL = unsafe {
-			// https://docs.microsoft.com/de-de/windows/win32/api/ioapiset/nf-ioapiset-getoverlappedresult
-			GetOverlappedResult(self.comdev, &mut overlapped, &mut len, TRUE)
-		};
-		if res == FALSE {
+		if unsafe {
+			// https://docs.microsoft.com/en-us/windows/win32/api/ioapiset/nf-ioapiset-getoverlappedresult
+			GetOverlappedResult(self.comdev, &mut overlapped, &mut len, FALSE)
+		} == FALSE {
+			// release mutex and return original error on failure
 			let error = io::Error::last_os_error();
-
-			// release mutex
 			let _res = unsafe { ReleaseMutex(self.mutex_read) };
 			debug_assert_ne!(_res, 0);
-
 			return Err(error);
 		}
 
@@ -422,38 +443,44 @@ impl SerialPort {
 		// queue async write
 		let mut overlapped: OVERLAPPED = unsafe { mem::zeroed() };
 		overlapped.hEvent = self.event_write;
-		let res: BOOL = unsafe {
-			// https://docs.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-writefile
-			WriteFile(self.comdev, buf.as_ptr() as *const c_void,
-				buf.len() as DWORD, ptr::null_mut(), &mut overlapped)
-		};
-
 		// async write request can (theoretically) succeed immediately, queue
 		// successfully, or fail. even if it returns TRUE, the number of bytes
 		// written should be retrieved via GetOverlappedResult().
-		if res == FALSE && unsafe { GetLastError() } != ERROR_IO_PENDING {
-			return Err(io::Error::last_os_error());
+		// https://docs.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-writefile
+		if unsafe { WriteFile(
+			self.comdev,
+			buf.as_ptr() as *const c_void,
+			buf.len() as DWORD,
+			ptr::null_mut(),
+			&mut overlapped
+		)} == FALSE {
+			let errcode = unsafe { GetLastError() };
+			if errcode != ERROR_IO_PENDING {
+				return Err(io::Error::from_raw_os_error(errcode as i32));
+			}
 		}
 
 		// wait for completion
+		// https://docs.microsoft.com/en-us/windows/win32/api/ioapiset/nf-ioapiset-getoverlappedresult
 		let mut len: DWORD = 0;
-		let res: BOOL = unsafe {
-			// https://docs.microsoft.com/de-de/windows/win32/api/ioapiset/nf-ioapiset-getoverlappedresult
-			GetOverlappedResult(self.comdev, &mut overlapped, &mut len, TRUE)
-		};
-		if res == FALSE {
+		if unsafe { GetOverlappedResult(
+			self.comdev,
+			&mut overlapped,
+			&mut len,
+			TRUE
+		)} == FALSE {
 			// WriteFile() may fail with ERROR_SEM_TIMEOUT, which is not
 			// io::ErrorKind::TimedOut prior to Rust 1.46, so create a custom
 			// error with kind TimedOut to simplify subsequent error handling.
 			// https://github.com/rust-lang/rust/pull/71756
-			let error = io::Error::last_os_error();
-			// TODO: wrap if clause in if_rust_version! { < 1.46 { ... }}
-			if error.raw_os_error().unwrap() as DWORD == ERROR_SEM_TIMEOUT
-			&& error.kind() != io::ErrorKind::TimedOut {
-				return Err(io::Error::new(io::ErrorKind::TimedOut,
-					"WriteFile() timed out (ERROR_SEM_TIMEOUT)"));
-			}
-			return Err(error);
+			let errcode = unsafe { GetLastError() };
+			if_rust_version! { < 1.46 {
+				if errcode == ERROR_SEM_TIMEOUT {
+					return Err(io::Error::new(io::ErrorKind::TimedOut,
+						"WriteFile() timed out (ERROR_SEM_TIMEOUT)"));
+				}
+			}}
+			return Err(io::Error::from_raw_os_error(errcode as i32));
 		}
 
 		match len {
@@ -476,12 +503,15 @@ impl SerialPort {
 
 impl Drop for SerialPort {
 	fn drop(&mut self) {
-		// https://docs.microsoft.com/de-de/windows/win32/api/handleapi/nf-handleapi-closehandle
+		// close all handles
+		// https://docs.microsoft.com/en-us/windows/win32/api/handleapi/nf-handleapi-closehandle
 		let _res = unsafe { CloseHandle(self.comdev) };
 		debug_assert_ne!(_res, 0);
 		let _res = unsafe { CloseHandle(self.event_read) };
 		debug_assert_ne!(_res, 0);
 		let _res = unsafe { CloseHandle(self.event_write) };
+		debug_assert_ne!(_res, 0);
+		let _res = unsafe { CloseHandle(self.mutex_read) };
 		debug_assert_ne!(_res, 0);
 	}
 }
