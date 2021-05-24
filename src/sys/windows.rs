@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use winapi::ctypes::c_void;
 use winapi::shared::minwindef::{DWORD, FALSE, TRUE};
 use winapi::shared::ntdef::NULL;
-use winapi::shared::winerror::{ERROR_IO_PENDING, ERROR_SEM_TIMEOUT, WAIT_TIMEOUT};
+use winapi::shared::winerror::{ERROR_IO_PENDING, ERROR_OPERATION_ABORTED, ERROR_SEM_TIMEOUT, WAIT_TIMEOUT};
 use winapi::um::commapi::{SetCommMask, SetCommState, SetCommTimeouts, WaitCommEvent};
 use winapi::um::errhandlingapi::GetLastError;
 use winapi::um::fileapi::{CreateFileW, OPEN_EXISTING, FlushFileBuffers, QueryDosDeviceW, ReadFile, WriteFile};
@@ -32,6 +32,7 @@ pub struct SerialPort {
 	event_read: HANDLE,
 	event_write: HANDLE,
 	mutex_read: HANDLE,
+	timeout_read: Option<Duration>,
 	timeout_read_ms: DWORD
 }
 
@@ -176,7 +177,14 @@ impl SerialPort {
 			return Err(error);
 		}
 
-		Ok(Self { comdev, event_read, event_write, mutex_read, timeout_read_ms })
+		Ok(Self {
+			comdev,
+			event_read,
+			event_write,
+			mutex_read,
+			timeout_read: timeout,
+			timeout_read_ms
+		})
 	}
 
 	pub fn try_clone(&self) -> io::Result<Self> {
@@ -250,6 +258,7 @@ impl SerialPort {
 				event_read,
 				event_write,
 				mutex_read,
+				timeout_read: self.timeout_read,
 				timeout_read_ms: self.timeout_read_ms
 			})
 		}
@@ -282,7 +291,7 @@ impl SerialPort {
 
 	pub fn read(&self, buf: &mut [u8]) -> io::Result<usize> {
 		// get time before acquiring mutex to update read timeout later
-		let instant_start = Instant::now();
+		let entry = Instant::now();
 
 		// acquire read mutex (may block up to self.timeout_read_ms)
 		match unsafe {
@@ -299,13 +308,32 @@ impl SerialPort {
 			_ => unreachable!()
 		}
 
+		// even when holding the mutex, WaitCommEvent() may return spuriously
+		// with a subsequent ReadFile(self.comdev, ...) returning 0, indicating
+		// that a timeout occurred. to counter this, call ReadFile() until
+		// a read succeeds or the read times out.
+		loop {
+			// compute read timeout in ms, accounting for time already elapsed
+			let elapsed = entry.elapsed();
+			let timeout_ms: c_int = match self.timeout_read {
+				None => INFINITE,
+				Some(timeout) if elapsed > timeout => {
+					return Err(io::Error::new(io::ErrorKind::TimedOut,
+						"reading from COM port timed out"));
+				},
+				Some(timeout) if timeout - elapsed <= Duration::from_millis(1) => 1,
+				Some(timeout) if timeout - elapsed >= Duration::from_millis(INFINITE as u64) => INFINITE - 1,
+				Some(timeout) => (timeout - elapsed).as_millis() as c_int
+			};
+		}
+
 		// call WaitCommEvent() to issue overlapped I/O request blocking until
 		// EV_RXCHAR event occurs
 		let mut overlapped: OVERLAPPED = unsafe { mem::zeroed() };
 		overlapped.hEvent = self.event_read;
 		let mut evt_mask: DWORD = 0;
 		match unsafe {
-			// implicitly resets event to non-singaled before returning
+			// implicitly resets event to non-signaled before returning
 			WaitCommEvent(self.comdev, &mut evt_mask, &mut overlapped)
 		} {
 			FALSE if unsafe { GetLastError() } != ERROR_IO_PENDING => {
@@ -374,10 +402,28 @@ impl SerialPort {
 					debug_assert_ne!(_res, 0);
 					return Err(error);
 				}
-				// TODO: Check if I/O operation was actually cancelled or
-				//       if it raced to completion before cancellation
-				//       occurred.
+				// Check if I/O operation was actually cancelled or
+				// if it raced to completion before cancellation
+				// occurred.
 				// https://docs.microsoft.com/en-us/windows/win32/api/ioapiset/nf-ioapiset-cancelio#remarks
+				let mut _undef: DWORD = 0;
+				if unsafe { GetOverlappedResult(
+					self.comdev,
+					&mut overlapped,
+					&mut _undef,
+					FALSE
+				)} == 0 {
+					// release mutex and return original error on failure
+					let errcode = unsafe { GetLastError() };
+					if errcode != ERROR_OPERATION_ABORTED {
+						// release mutex and return original error on failure
+						let _res = unsafe { ReleaseMutex(self.mutex_read) };
+						debug_assert_ne!(_res, 0);
+						return Err(io::Error::from_raw_os_error(errcode as i32));
+					}
+				} else {
+					println!("WaitCommEvent() cancelled but succeeded: evt_mask={:}", evt_mask);
+				}
 
 				// release mutex
 				let _res = unsafe { ReleaseMutex(self.mutex_read) };
