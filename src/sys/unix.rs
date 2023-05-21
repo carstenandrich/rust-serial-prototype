@@ -113,17 +113,8 @@ impl SerialPort {
 			timeout_write: self.timeout_write
 		})
 	}
-}
 
-impl Drop for SerialPort {
-	fn drop(&mut self) {
-		let _res = unsafe { libc::close(self.fd) };
-		debug_assert_eq!(_res, 0);
-	}
-}
-
-impl io::Read for SerialPort {
-	fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+	pub fn read(&self, buf: &mut [u8]) -> io::Result<usize> {
 		let mut pollfd = libc::pollfd {
 			fd: self.fd,
 			events: libc::POLLIN,
@@ -182,10 +173,8 @@ impl io::Read for SerialPort {
 			}
 		}
 	}
-}
 
-impl io::Write for SerialPort {
-	fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+	pub fn write(&self, buf: &[u8]) -> io::Result<usize> {
 		let mut pollfd = libc::pollfd {
 			fd: self.fd,
 			events: libc::POLLOUT,
@@ -244,12 +233,19 @@ impl io::Write for SerialPort {
 		}
 	}
 
-	fn flush(&mut self) -> io::Result<()> {
+	pub fn flush(&self) -> io::Result<()> {
 		match unsafe { libc::fsync(self.fd) } {
 			-1 => Err(io::Error::last_os_error()),
 			0 => Ok(()),
 			_ if cfg!(debug_assertions) => panic!("fsync() returned invalid value"),
 			_ => unreachable!()
 		}
+	}
+}
+
+impl Drop for SerialPort {
+	fn drop(&mut self) {
+		let _res = unsafe { libc::close(self.fd) };
+		debug_assert_eq!(_res, 0);
 	}
 }

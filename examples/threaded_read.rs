@@ -2,6 +2,7 @@ extern crate serial;
 
 use std::env;
 use std::io::Read;
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 use serial::SerialPort;
@@ -19,7 +20,7 @@ fn main() {
 	}
 
 	// open serial port and clone once
-	let mut ser = SerialPort::open(
+	let ser = SerialPort::open(
 			&args[1], Some(Duration::from_millis(1000))
 		).expect("opening serial port failed");
 	let mut ser_clone = ser.try_clone().expect("cloning serial port failed");
@@ -36,10 +37,23 @@ fn main() {
 		}
 	}));
 
+	// move original serial port into Arc
+	let ser = Arc::new(ser);
+
+	// read from original serial port in separate thread
+	let ser_clone = ser.clone();
+	threads.push(thread::spawn(move || {
+		let mut buf = [0u8; 1024];
+		for _ in 0..NUM_IO_OPS {
+			let res = (&*ser_clone).read(&mut buf);
+			println!("<R {:?} {:?}", start.elapsed(), res);
+		}
+	}));
+
 	// read from original serial port in main thread
 	let mut buf = [0u8; 1024];
 	for _ in 0..NUM_IO_OPS {
-		let res = ser.read(&mut buf);
+		let res = (&*ser).read(&mut buf);
 		println!("<M {:?} {:?}", start.elapsed(), res);
 	}
 

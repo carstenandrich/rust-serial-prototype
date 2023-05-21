@@ -190,20 +190,8 @@ impl SerialPort {
 
 		devices
 	}
-}
 
-impl Drop for SerialPort {
-	fn drop(&mut self) {
-		// https://docs.microsoft.com/de-de/windows/win32/api/handleapi/nf-handleapi-closehandle
-		let _res = unsafe { CloseHandle(self.comdev) };
-		debug_assert_ne!(_res, 0);
-		let _res = unsafe { CloseHandle(self.event) };
-		debug_assert_ne!(_res, 0);
-	}
-}
-
-impl io::Read for SerialPort {
-	fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+	pub fn read(&self, buf: &mut [u8]) -> io::Result<usize> {
 		// queue async read
 		let mut overlapped: OVERLAPPED = unsafe { mem::zeroed() };
 		overlapped.hEvent = self.event;
@@ -237,10 +225,8 @@ impl io::Read for SerialPort {
 			_ => Ok(len as usize)
 		}
 	}
-}
 
-impl io::Write for SerialPort {
-	fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+	pub fn write(&self, buf: &[u8]) -> io::Result<usize> {
 		// queue async write
 		let mut overlapped: OVERLAPPED = unsafe { mem::zeroed() };
 		overlapped.hEvent = self.event;
@@ -286,12 +272,22 @@ impl io::Write for SerialPort {
 		}
 	}
 
-	fn flush(&mut self) -> io::Result<()> {
+	pub fn flush(&self) -> io::Result<()> {
 		// https://docs.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-flushfilebuffers
 		// https://docs.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-purgecomm#remarks
 		match unsafe { FlushFileBuffers(self.comdev) } {
 			0 => Err(io::Error::last_os_error()),
 			_ => Ok(()),
 		}
+	}
+}
+
+impl Drop for SerialPort {
+	fn drop(&mut self) {
+		// https://docs.microsoft.com/de-de/windows/win32/api/handleapi/nf-handleapi-closehandle
+		let _res = unsafe { CloseHandle(self.comdev) };
+		debug_assert_ne!(_res, 0);
+		let _res = unsafe { CloseHandle(self.event) };
+		debug_assert_ne!(_res, 0);
 	}
 }
