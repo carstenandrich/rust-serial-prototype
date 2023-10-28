@@ -1,6 +1,4 @@
-#[cfg(windows)]
-
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::io;
 use std::time::Duration;
 
@@ -16,6 +14,10 @@ impl SerialPort {
 
 	pub fn try_clone(&self) -> io::Result<Self> {
 		self.0.try_clone().map(Self)
+	}
+
+	pub fn list_devices() -> Vec<OsString> {
+		sys::SerialPort::list_devices()
 	}
 }
 
