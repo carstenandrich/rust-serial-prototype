@@ -10,7 +10,7 @@ use std::time::Duration;
 use winapi::ctypes::c_void;
 use winapi::shared::minwindef::{BOOL, DWORD, FALSE, TRUE};
 use winapi::shared::ntdef::NULL;
-use winapi::shared::winerror::{ERROR_IO_PENDING, ERROR_SEM_TIMEOUT};
+use winapi::shared::winerror::ERROR_IO_PENDING;
 use winapi::um::commapi::{SetCommState, SetCommTimeouts};
 use winapi::um::errhandlingapi::GetLastError;
 use winapi::um::fileapi::{CreateFileW, OPEN_EXISTING, FlushFileBuffers, QueryDosDeviceW, ReadFile, WriteFile};
@@ -250,18 +250,12 @@ impl SerialPort {
 			GetOverlappedResult(self.comdev, &mut overlapped, &mut len, TRUE)
 		};
 		if res == FALSE {
-			// WriteFile() may fail with ERROR_SEM_TIMEOUT, which is not
-			// io::ErrorKind::TimedOut prior to Rust 1.46, so create a custom
-			// error with kind TimedOut to simplify subsequent error handling.
+			// minimum supported rust version (MSRV) is 1.46, because WriteFile()
+			// may fail with ERROR_SEM_TIMEOUT, which is
+			// std::io::ErrorKind::TimedOut only since Rust 1.46, see:
 			// https://github.com/rust-lang/rust/pull/71756
-			let error = io::Error::last_os_error();
-			// TODO: wrap if clause in if_rust_version! { < 1.46 { ... }}
-			if error.raw_os_error().unwrap() as DWORD == ERROR_SEM_TIMEOUT
-			&& error.kind() != io::ErrorKind::TimedOut {
-				return Err(io::Error::new(io::ErrorKind::TimedOut,
-					"WriteFile() timed out (ERROR_SEM_TIMEOUT)"));
-			}
-			return Err(error);
+			let errcode = unsafe { GetLastError() };
+			return Err(io::Error::from_raw_os_error(errcode as i32));
 		}
 
 		match len {
