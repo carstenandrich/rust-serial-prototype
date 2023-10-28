@@ -7,7 +7,7 @@ use std::os::windows::ffi::OsStrExt;
 use std::ptr;
 use std::time::{Duration, Instant};
 
-use winapi::ctypes::c_void;
+use winapi::ctypes::{c_int, c_void};
 use winapi::shared::minwindef::{DWORD, FALSE, TRUE};
 use winapi::shared::ntdef::NULL;
 use winapi::shared::winerror::{ERROR_IO_PENDING, ERROR_OPERATION_ABORTED, ERROR_SEM_TIMEOUT, WAIT_TIMEOUT};
@@ -316,13 +316,13 @@ impl SerialPort {
 			// compute read timeout in ms, accounting for time already elapsed
 			let elapsed = entry.elapsed();
 			let timeout_ms: c_int = match self.timeout_read {
-				None => INFINITE,
+				None => INFINITE as i32,
 				Some(timeout) if elapsed > timeout => {
 					return Err(io::Error::new(io::ErrorKind::TimedOut,
 						"reading from COM port timed out"));
 				},
 				Some(timeout) if timeout - elapsed <= Duration::from_millis(1) => 1,
-				Some(timeout) if timeout - elapsed >= Duration::from_millis(INFINITE as u64) => INFINITE - 1,
+				Some(timeout) if timeout - elapsed >= Duration::from_millis(INFINITE as u64) => INFINITE as i32 - 1,
 				Some(timeout) => (timeout - elapsed).as_millis() as c_int
 			};
 		}
@@ -352,7 +352,7 @@ impl SerialPort {
 
 		// compute updated read timeout, accounting for time spent waiting for
 		// read mutex, so total timeout does not exceed self.timeout_read_ms
-		let waited_ms = instant_start.elapsed().as_millis();
+		let waited_ms = entry.elapsed().as_millis();
 		let timeout_read_ms = if waited_ms < self.timeout_read_ms as u128 {
 			self.timeout_read_ms - waited_ms as DWORD
 		} else {

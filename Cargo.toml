@@ -13,3 +13,6 @@ udev = "0.4"
 [target.'cfg(windows)'.dependencies]
 if_rust_version = "1.0.0"
 winapi = { version = "0.3", features = ["std", "commapi", "errhandlingapi", "fileapi", "handleapi", "ioapiset", "synchapi", "winbase", "winerror", "winnt"] }
+
+[features]
+experimental = []
