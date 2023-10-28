@@ -39,22 +39,23 @@
 // FALSE and GetLastError() indicates ERR_SEM_TIMEOUT (121) on timeout (tested
 // on Windows 10 version 1809).
 
-extern crate winapi;
+extern crate windows_sys;
 
-use std::ffi::OsStr;
+use std::ffi::{c_void, OsStr};
 use std::io;
 use std::mem;
 use std::os::windows::ffi::OsStrExt;
 use std::ptr;
 use std::time::Duration;
 
-use winapi::ctypes::c_void;
-use winapi::shared::minwindef::{BOOL, DWORD, TRUE};
-use winapi::um::commapi::{SetCommState, SetCommTimeouts};
-use winapi::um::fileapi::{CreateFileW, OPEN_EXISTING, FlushFileBuffers, ReadFile, WriteFile};
-use winapi::um::handleapi::{CloseHandle, INVALID_HANDLE_VALUE};
-use winapi::um::winbase::{CBR_256000, COMMTIMEOUTS, DCB, NOPARITY, ONESTOPBIT};
-use winapi::um::winnt::{FILE_ATTRIBUTE_NORMAL, GENERIC_READ, GENERIC_WRITE, HANDLE, MAXDWORD};
+use windows_sys::{
+	Win32::Devices::Communication::*,
+	Win32::Foundation::*,
+	Win32::Storage::FileSystem::*,
+	Win32::System::WindowsProgramming::*
+};
+
+const MAXDWORD: u32 = u32::MAX;
 
 pub struct SerialPort {
 	handle: HANDLE
@@ -82,7 +83,8 @@ impl SerialPort {
 		// https://docs.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-dcb
 		let mut dcb: DCB = unsafe { mem::zeroed() };
 		dcb.DCBlength = mem::size_of::<DCB>() as u32;
-		dcb.set_fBinary(TRUE as u32);
+		// set fBinary field
+		dcb._bitfield = 0x0000_0001;
 		dcb.BaudRate = CBR_256000;
 		dcb.ByteSize = 8;
 		dcb.StopBits = ONESTOPBIT;
@@ -115,11 +117,11 @@ impl SerialPort {
 				// https://docs.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-commtimeouts#remarks
 				ReadIntervalTimeout: MAXDWORD,
 				ReadTotalTimeoutMultiplier: MAXDWORD,
-				ReadTotalTimeoutConstant: dur_ms as DWORD,
+				ReadTotalTimeoutConstant: dur_ms as u32,
 				// MAXDWORD is *not* a reserved WriteTotalTimeoutMultiplier
 				// value, i.e., setting it incurs an very long write timeout
 				WriteTotalTimeoutMultiplier: 0,
-				WriteTotalTimeoutConstant: dur_ms as DWORD,
+				WriteTotalTimeoutConstant: dur_ms as u32,
 			}
 		} else {
 			// blocking read/write without timeout
@@ -156,10 +158,10 @@ impl Drop for SerialPort {
 
 impl io::Read for SerialPort {
 	fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-		let mut len: DWORD = 0;
+		let mut len: u32 = 0;
 		let res: BOOL = unsafe {
 			ReadFile(self.handle, buf.as_mut_ptr() as *mut c_void,
-				buf.len() as DWORD, &mut len, ptr::null_mut())
+				buf.len() as u32, &mut len, ptr::null_mut())
 		};
 
 		match res {
@@ -173,10 +175,10 @@ impl io::Read for SerialPort {
 
 impl io::Write for SerialPort {
 	fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-		let mut len: DWORD = 0;
+		let mut len: u32 = 0;
 		let res: BOOL = unsafe {
-			WriteFile(self.handle, buf.as_ptr() as *mut c_void,
-				buf.len() as DWORD, &mut len, ptr::null_mut())
+			WriteFile(self.handle, buf.as_ptr(),
+				buf.len() as u32, &mut len, ptr::null_mut())
 		};
 
 		match res {

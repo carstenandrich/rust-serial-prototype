@@ -1,31 +1,22 @@
-extern crate winapi;
+extern crate windows_sys;
 
-use std::ffi::{OsStr, OsString};
+use std::ffi::{c_int, c_void, OsStr, OsString};
 use std::io;
 use std::mem;
 use std::os::windows::ffi::OsStrExt;
 use std::ptr;
 use std::time::{Duration, Instant};
 
-use winapi::ctypes::{c_int, c_void};
-use winapi::shared::minwindef::{DWORD, FALSE, TRUE};
-use winapi::shared::ntdef::NULL;
-use winapi::shared::winerror::{ERROR_IO_PENDING, ERROR_OPERATION_ABORTED, WAIT_TIMEOUT};
-use winapi::um::commapi::{SetCommMask, SetCommState, SetCommTimeouts, WaitCommEvent};
-use winapi::um::errhandlingapi::GetLastError;
-use winapi::um::fileapi::{CreateFileW, OPEN_EXISTING, FlushFileBuffers, QueryDosDeviceW, ReadFile, WriteFile};
-use winapi::um::handleapi::{CloseHandle, DuplicateHandle, INVALID_HANDLE_VALUE};
-use winapi::um::ioapiset::{CancelIo, GetOverlappedResult};
-use winapi::um::minwinbase::OVERLAPPED;
-use winapi::um::processthreadsapi::GetCurrentProcess;
-use winapi::um::synchapi::{CreateEventW, CreateMutexW, ReleaseMutex, WaitForSingleObject};
-use winapi::um::winbase::{CBR_256000, COMMTIMEOUTS, DCB, FILE_FLAG_OVERLAPPED, INFINITE, NOPARITY, ONESTOPBIT, WAIT_ABANDONED, WAIT_FAILED, WAIT_OBJECT_0};
-use winapi::um::winnt::{DUPLICATE_SAME_ACCESS, GENERIC_READ, GENERIC_WRITE, HANDLE, MAXDWORD};
+use windows_sys::Win32::{
+	Devices::Communication::*,
+	Foundation::*,
+	Storage::FileSystem::*,
+	System::IO::*,
+	System::Threading::*,
+	System::WindowsProgramming::*
+};
 
-// character received event mask for WaitCommEvent(), which is missing from
-// winapi 0.3.9
-// https://docs.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-waitcommevent#parameters
-const EV_RXCHAR: DWORD = 0x0001;
+const MAXDWORD: u32 = u32::MAX;
 
 pub struct SerialPort {
 	comdev: HANDLE,
@@ -33,7 +24,7 @@ pub struct SerialPort {
 	event_write: HANDLE,
 	mutex_read: HANDLE,
 	timeout_read: Option<Duration>,
-	timeout_read_ms: DWORD
+	timeout_read_ms: u32
 }
 
 // HANDLE is type *mut c_void which does not implement Send and Sync, so
@@ -64,7 +55,8 @@ impl SerialPort {
 		// https://docs.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-dcb
 		let mut dcb: DCB = unsafe { mem::zeroed() };
 		dcb.DCBlength = mem::size_of::<DCB>() as u32;
-		dcb.set_fBinary(TRUE as u32);
+		// set fBinary field
+		dcb._bitfield = 0x0000_0001;
 		dcb.BaudRate = CBR_256000;
 		dcb.ByteSize = 8;
 		dcb.StopBits = ONESTOPBIT;
@@ -79,18 +71,18 @@ impl SerialPort {
 
 		// compute read timeout in millisecons for WaitForSingleObject()
 		// https://docs.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-waitforsingleobject#parameters
-		let timeout_read_ms: DWORD = match timeout {
+		let timeout_read_ms: u32 = match timeout {
 			None => INFINITE,
 			Some(dur) if dur == Duration::new(0, 0) => 0,
 			Some(dur) if dur <= Duration::from_millis(1) => 1,
 			// clip read timeouts at INFINITE - 1 == MAXDWORD - 1
 			Some(dur) if dur >= Duration::from_millis(INFINITE as u64) => INFINITE - 1,
-			Some(dur) => dur.as_millis() as DWORD
+			Some(dur) => dur.as_millis() as u32
 		};
 
 		// compute write timeout in millisecons for COMMTIMEOUTS
 		// https://docs.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-commtimeouts#members
-		let timeout_write_ms: DWORD = match timeout {
+		let timeout_write_ms: u32 = match timeout {
 			// zero is no (i.e., infinite) timeout
 			None => 0,
 			// COMMTIMEOUTS does not support non-blocking write, so set
@@ -98,7 +90,7 @@ impl SerialPort {
 			// up to 1 ms, including zero Duration
 			Some(dur) if dur <= Duration::from_millis(1) => 1,
 			Some(dur) if dur >= Duration::from_millis(MAXDWORD as u64) => MAXDWORD,
-			Some(dur) => dur.as_millis() as DWORD
+			Some(dur) => dur.as_millis() as u32
 		};
 
 		// populate COMMTIMEOUTS struct
@@ -112,7 +104,7 @@ impl SerialPort {
 			ReadTotalTimeoutConstant: 0,
 			// set write timeout computed above
 			WriteTotalTimeoutMultiplier: 0,
-			WriteTotalTimeoutConstant: timeout_write_ms as DWORD,
+			WriteTotalTimeoutConstant: timeout_write_ms as u32,
 		};
 
 		// set timeouts
@@ -139,7 +131,7 @@ impl SerialPort {
 			// https://docs.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-createeventw
 			CreateEventW(ptr::null_mut(), TRUE, FALSE, ptr::null_mut())
 		};
-		if event_read == NULL {
+		if event_read == 0 {
 			// close open handles and return original error on failure
 			let error = io::Error::last_os_error();
 			let _res = unsafe { CloseHandle(comdev) };
@@ -150,7 +142,7 @@ impl SerialPort {
 			// https://docs.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-createeventw
 			CreateEventW(ptr::null_mut(), TRUE, FALSE, ptr::null_mut())
 		};
-		if event_write == NULL {
+		if event_write == 0 {
 			// close open handles and return original error on failure
 			let error = io::Error::last_os_error();
 			let _res = unsafe { CloseHandle(comdev) };
@@ -165,7 +157,7 @@ impl SerialPort {
 			// https://docs.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-createmutexw
 			CreateMutexW(ptr::null_mut(), FALSE, ptr::null_mut())
 		};
-		if mutex_read == NULL {
+		if mutex_read == 0 {
 			// close open handles and return original error on failure
 			let error = io::Error::last_os_error();
 			let _res = unsafe { CloseHandle(comdev) };
@@ -193,14 +185,14 @@ impl SerialPort {
 			// https://docs.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-createeventw
 			CreateEventW(ptr::null_mut(), TRUE, FALSE, ptr::null_mut())
 		};
-		if event_read == NULL {
+		if event_read == 0 {
 			return Err(io::Error::last_os_error());
 		}
 		let event_write = unsafe {
 			// https://docs.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-createeventw
 			CreateEventW(ptr::null_mut(), TRUE, FALSE, ptr::null_mut())
 		};
-		if event_write == NULL {
+		if event_write == 0 {
 			// close open handles and return original error on failure
 			let error = io::Error::last_os_error();
 			let _res = unsafe { CloseHandle(event_read) };
@@ -280,7 +272,7 @@ impl SerialPort {
 			if unsafe { QueryDosDeviceW(
 				name_wide.as_ptr(),
 				path_wide.as_mut_ptr(),
-				path_wide.len() as DWORD
+				path_wide.len() as u32
 			) as usize } > 0 {
 				devices.push(name);
 			}
@@ -331,7 +323,7 @@ impl SerialPort {
 		// EV_RXCHAR event occurs
 		let mut overlapped: OVERLAPPED = unsafe { mem::zeroed() };
 		overlapped.hEvent = self.event_read;
-		let mut evt_mask: DWORD = 0;
+		let mut evt_mask: u32 = 0;
 		match unsafe {
 			// implicitly resets event to non-signaled before returning
 			WaitCommEvent(self.comdev, &mut evt_mask, &mut overlapped)
@@ -354,7 +346,7 @@ impl SerialPort {
 		// read mutex, so total timeout does not exceed self.timeout_read_ms
 		let waited_ms = entry.elapsed().as_millis();
 		let timeout_read_ms = if waited_ms < self.timeout_read_ms as u128 {
-			self.timeout_read_ms - waited_ms as DWORD
+			self.timeout_read_ms - waited_ms as u32
 		} else {
 			0
 		};
@@ -370,7 +362,7 @@ impl SerialPort {
 				return Err(error);
 			},
 			WAIT_OBJECT_0 => {
-				let mut _undef: DWORD = 0;
+				let mut _undef: u32 = 0;
 				if unsafe { GetOverlappedResult(
 					self.comdev,
 					&mut overlapped,
@@ -406,7 +398,7 @@ impl SerialPort {
 				// if it raced to completion before cancellation
 				// occurred.
 				// https://docs.microsoft.com/en-us/windows/win32/api/ioapiset/nf-ioapiset-cancelio#remarks
-				let mut _undef: DWORD = 0;
+				let mut _undef: u32 = 0;
 				if unsafe { GetOverlappedResult(
 					self.comdev,
 					&mut overlapped,
@@ -447,7 +439,7 @@ impl SerialPort {
 		if unsafe { ReadFile(
 			self.comdev,
 			buf.as_mut_ptr() as *mut c_void,
-			buf.len() as DWORD,
+			buf.len() as u32,
 			ptr::null_mut(),
 			&mut overlapped
 		)} == FALSE {
@@ -461,7 +453,7 @@ impl SerialPort {
 		}
 
 		// wait for completion
-		let mut len: DWORD = 0;
+		let mut len: u32 = 0;
 		if unsafe {
 			// https://docs.microsoft.com/en-us/windows/win32/api/ioapiset/nf-ioapiset-getoverlappedresult
 			GetOverlappedResult(self.comdev, &mut overlapped, &mut len, FALSE)
@@ -495,8 +487,8 @@ impl SerialPort {
 		// https://docs.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-writefile
 		if unsafe { WriteFile(
 			self.comdev,
-			buf.as_ptr() as *const c_void,
-			buf.len() as DWORD,
+			buf.as_ptr(),
+			buf.len() as u32,
 			ptr::null_mut(),
 			&mut overlapped
 		)} == FALSE {
@@ -508,7 +500,7 @@ impl SerialPort {
 
 		// wait for completion
 		// https://docs.microsoft.com/en-us/windows/win32/api/ioapiset/nf-ioapiset-getoverlappedresult
-		let mut len: DWORD = 0;
+		let mut len: u32 = 0;
 		if unsafe { GetOverlappedResult(
 			self.comdev,
 			&mut overlapped,
