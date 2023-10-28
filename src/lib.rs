@@ -1,3 +1,7 @@
+#[cfg(windows)]
+#[cfg_attr(windows, macro_use)]
+extern crate if_rust_version;
+
 use std::ffi::OsStr;
 use std::io;
 use std::time::Duration;
