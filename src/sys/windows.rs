@@ -38,6 +38,7 @@ impl SerialPort {
 		name.push(0);
 
 		// open COM port as raw HANDLE
+		// https://docs.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilew
 		let comdev = unsafe {
 			CreateFileW(name.as_ptr(), GENERIC_READ | GENERIC_WRITE, 0,
 				ptr::null_mut(), OPEN_EXISTING, FILE_FLAG_OVERLAPPED, 0 as HANDLE)
@@ -48,7 +49,7 @@ impl SerialPort {
 
 		// create unnamed event object for asynchronous I/O
 		let event = unsafe {
-			// https://docs.microsoft.com/de-de/windows/win32/api/synchapi/nf-synchapi-createeventa
+			// https://docs.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-createeventw
 			CreateEventW(ptr::null_mut(), FALSE, FALSE, ptr::null_mut())
 		};
 		if event == 0 {
@@ -71,6 +72,7 @@ impl SerialPort {
 		dcb.StopBits = ONESTOPBIT;
 		dcb.Parity = NOPARITY;
 		if unsafe { SetCommState(comdev, &mut dcb) } == 0 {
+			// close open handles and return original error on failure
 			let error = io::Error::last_os_error();
 
 			let _res = unsafe { CloseHandle(comdev) };
@@ -103,7 +105,7 @@ impl SerialPort {
 				ReadTotalTimeoutMultiplier: MAXDWORD,
 				ReadTotalTimeoutConstant: dur_ms as u32,
 				// MAXDWORD is *not* a reserved WriteTotalTimeoutMultiplier
-				// value, i.e., setting it incurs an very long write timeout
+				// value, i.e., setting it incurs a very long write timeout
 				WriteTotalTimeoutMultiplier: 0,
 				WriteTotalTimeoutConstant: dur_ms as u32,
 			}
@@ -121,6 +123,7 @@ impl SerialPort {
 
 		// set timeouts
 		if unsafe { SetCommTimeouts(comdev, &mut timeouts) } == 0 {
+			// close open handles and return original error on failure
 			let error = io::Error::last_os_error();
 
 			let _res = unsafe { CloseHandle(comdev) };
@@ -137,7 +140,7 @@ impl SerialPort {
 	pub fn try_clone(&self) -> io::Result<Self> {
 		// create new unnamed event object for asynchronous I/O
 		let event = unsafe {
-			// https://docs.microsoft.com/de-de/windows/win32/api/synchapi/nf-synchapi-createeventa
+			// https://docs.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-createeventw
 			CreateEventW(ptr::null_mut(), FALSE, FALSE, ptr::null_mut())
 		};
 		if event == 0 {
@@ -208,7 +211,7 @@ impl SerialPort {
 		// wait for completion
 		let mut len: u32 = 0;
 		let res: BOOL = unsafe {
-			// https://docs.microsoft.com/de-de/windows/win32/api/ioapiset/nf-ioapiset-getoverlappedresult
+			// https://docs.microsoft.com/en-us/windows/win32/api/ioapiset/nf-ioapiset-getoverlappedresult
 			GetOverlappedResult(self.comdev, &mut overlapped, &mut len, TRUE)
 		};
 		if res == FALSE {
@@ -243,7 +246,7 @@ impl SerialPort {
 		// wait for completion
 		let mut len: u32 = 0;
 		let res: BOOL = unsafe {
-			// https://docs.microsoft.com/de-de/windows/win32/api/ioapiset/nf-ioapiset-getoverlappedresult
+			// https://docs.microsoft.com/en-us/windows/win32/api/ioapiset/nf-ioapiset-getoverlappedresult
 			GetOverlappedResult(self.comdev, &mut overlapped, &mut len, TRUE)
 		};
 		if res == FALSE {
@@ -251,8 +254,7 @@ impl SerialPort {
 			// may fail with ERROR_SEM_TIMEOUT, which is
 			// std::io::ErrorKind::TimedOut only since Rust 1.46, see:
 			// https://github.com/rust-lang/rust/pull/71756
-			let errcode = unsafe { GetLastError() };
-			return Err(io::Error::from_raw_os_error(errcode as i32));
+			return Err(io::Error::last_os_error());
 		}
 
 		match len {
@@ -275,7 +277,8 @@ impl SerialPort {
 
 impl Drop for SerialPort {
 	fn drop(&mut self) {
-		// https://docs.microsoft.com/de-de/windows/win32/api/handleapi/nf-handleapi-closehandle
+		// close all handles
+		// https://docs.microsoft.com/en-us/windows/win32/api/handleapi/nf-handleapi-closehandle
 		let _res = unsafe { CloseHandle(self.comdev) };
 		debug_assert_ne!(_res, 0);
 		let _res = unsafe { CloseHandle(self.event) };

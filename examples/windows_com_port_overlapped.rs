@@ -27,6 +27,9 @@
 // by opening a COM port with 10 millisecond read/write timeout and reading/
 // writing a couple of times.
 
+// FIXME: build fails on non-windows platforms for lack of fn main()
+#![cfg(windows)]
+
 extern crate windows_sys;
 
 use std::ffi::{c_void, OsStr, OsString};

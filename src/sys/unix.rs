@@ -196,7 +196,7 @@ impl SerialPort {
 				Some(timeout) => (timeout - elapsed).as_millis() as c_int
 			};
 
-			// block until data is available or timeout occurs
+			// block until tty becomes writable or timeout occurs
 			match unsafe { libc::poll(&mut pollfd, 1, timeout_ms) } {
 				-1 => return Err(io::Error::last_os_error()),
 				0 => return Err(io::Error::new(io::ErrorKind::TimedOut,

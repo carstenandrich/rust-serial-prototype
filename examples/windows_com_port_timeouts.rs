@@ -39,6 +39,9 @@
 // FALSE and GetLastError() indicates ERR_SEM_TIMEOUT (121) on timeout (tested
 // on Windows 10 version 1809).
 
+// FIXME: build fails on non-windows platforms for lack of fn main()
+#![cfg(windows)]
+
 extern crate windows_sys;
 
 use std::ffi::{c_void, OsStr};

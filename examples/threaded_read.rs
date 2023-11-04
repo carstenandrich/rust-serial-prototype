@@ -45,7 +45,7 @@ fn main() {
 	threads.push(thread::spawn(move || {
 		let mut buf = [0u8; 1024];
 		for _ in 0..NUM_IO_OPS {
-			let res = (&*ser_clone).read(&mut buf);
+			let res = ser_clone.as_ref().read(&mut buf);
 			println!("<R {:?} {:?}", start.elapsed(), res);
 		}
 	}));
@@ -53,7 +53,7 @@ fn main() {
 	// read from original serial port in main thread
 	let mut buf = [0u8; 1024];
 	for _ in 0..NUM_IO_OPS {
-		let res = (&*ser).read(&mut buf);
+		let res = ser.as_ref().read(&mut buf);
 		println!("<M {:?} {:?}", start.elapsed(), res);
 	}
 
