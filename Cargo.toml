@@ -2,9 +2,7 @@
 name = "serial"
 version = "0.0.1"
 authors = ["Carsten Andrich <carsten@andrich.name>"]
-edition = "2018"
-# minimum supported rust version (MSRV) is actually Rust 1.46, due to Windows
-# ERROR_SEM_TIMEOUT not being std::io::ErrorKind::TimedOut prior to Rust 1.46
+edition = "2021"
 rust-version = "1.56"
 
 [target.'cfg(unix)'.dependencies]
@@ -26,3 +24,7 @@ windows-sys = { version = "0.48", features = [
 
 [features]
 experimental = []
+
+[profile.release]
+strip = "debuginfo"
+lto = "thin"
