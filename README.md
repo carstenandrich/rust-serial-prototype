@@ -19,8 +19,8 @@ Reliable locking (on POSIX)            | ✅   | ❌       | ❌        | ❌
 `impl std::io::{Read,Write}`           | ✅   | ✅       | ✅        | ✅
 Concurrent I/O (on Windows)            | ✅   | ❌       | ✅        | ❌
 `read(&self, …)` and `write(&self, …)` | ❌   | ❌       | ✅        | ❌
-`.try_clone()`                         | ✅   | ❌       | ❌        | ✅
-`impl std::io::{Read,Write} for &Self` | ✅   | ❌       | ❌        | ❌
+`.try_clone()`                         | ✅   | ❌       | ✅        | ✅
+`impl std::io::{Read,Write} for &Self` | ✅   | ❌       | ✅        | ❌
 ???                                    | ❓   | ❓       | ❓        | ❓
 
 ## Portable read timeouts
